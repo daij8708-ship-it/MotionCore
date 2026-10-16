@@ -1,0 +1,131 @@
+# 持续集成：每次推送到 main 与每个 PR 都重新构建并跑全部测试。
+#
+# 三个 job 刻意分开，它们是三种不同的"面"：
+#   fingerprint —— 报告结论与当前源码是否还对得上（不需要编译器，秒级）
+#   core        —— 零 Qt 的协议核心库（ADR-001：没装 Qt 的机器也必须能构建与测试）
+#   host        —— Qt6 上位机（界面用例 + 无头自检）
+#
+# 运行环境固定 ubuntu-22.04，与本地验证环境（WSL Ubuntu 22.04 / g++ 11.4 / cmake 3.22）对齐。
+# 换版本会把"本地绿 ≠ CI 绿"的差异掺进环境变量，而这个项目的规矩是两边都必须能复现。
+
+name: 构建与测试
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+jobs:
+  fingerprint:
+    name: 源码指纹与测试报告一致性
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: 核对聚合指纹
+        # 口径与 docs/TEST_REPORT.md §1 逐字一致：只覆盖参与构建的产物，刻意不含 docs/
+        # （含 docs/ 会形成自指 —— 那个文件里就写着这个指纹）。
+        run: |
+          set -euo pipefail
+          got=$(find CMakeLists.txt common tools host -type f | LC_ALL=C sort \
+                | xargs sha256sum --text | sha256sum --text | cut -d' ' -f1)
+          want=$(grep -m1 '结果：' docs/TEST_REPORT.md | grep -oE '[0-9a-f]{64}' || true)
+          echo "当前源码聚合值：$got"
+          echo "报告记录的值：  $want"
+          if [ -z "$want" ]; then
+            echo "::error::docs/TEST_REPORT.md §1 里没找到指纹行"
+            exit 1
+          fi
+          if [ "$got" != "$want" ]; then
+            echo "::error::源码已改动，但报告里的指纹没跟着更新 —— 这份报告的结论已失效。请重跑测试并回填 §1。"
+            exit 1
+          fi
+          echo "一致：报告描述的确实是这份源码。"
+
+  core:
+    name: 协议核心（无 Qt）
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: 安装依赖
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y cmake g++ libgtest-dev
+
+      - name: 配置
+        # 刻意**不**传 -DMC_BUILD_HOST=OFF：这台 runner 没装 Qt6，
+        # 正好用它验证"找不到 Qt 时 host/ 安静跳过、绝不让配置失败"这条 ADR-001 的行为。
+        run: |
+          set -euo pipefail
+          cmake -S . -B build -DCMAKE_BUILD_TYPE=Debug 2>&1 | tee /tmp/configure.log
+
+      - name: 断言 host/ 确实被跳过
+        # 两条都要满足才算"安静跳过"真的成立：
+        #   ① 配置输出里必须出现那句警告（说明是 host/CMakeLists.txt 主动 return 的）；
+        #   ② 产物 build/host/mc_host 必须不存在。
+        # ⚠️ 不能拿 build/host/CMakeCache.txt 当判据 —— CMake 只给调用 project() 的目录建这个文件，
+        #    它在任何情况下都不存在，拿它做断言是**恒真的**（本地实测确认过）。
+        run: |
+          set -euo pipefail
+          if ! grep -q '跳过 host' /tmp/configure.log; then
+            echo "::error::配置输出里没有出现\"未找到 Qt6 Widgets，跳过 host/\"这句警告"
+            exit 1
+          fi
+          if [ -e build/host/mc_host ]; then
+            echo "::error::这台 runner 没有 Qt6，却构建出了 host/mc_host —— 安静跳过的行为被破坏了"
+            exit 1
+          fi
+          echo "已确认：没有 Qt6 的环境里 host/ 不参与构建，且警告如实打了出来。"
+
+      - name: 构建
+        run: cmake --build build -j"$(nproc)"
+
+      - name: 跑测试
+        run: ctest --test-dir build --output-on-failure
+
+      - name: 断言核心产物零 Qt 依赖
+        # README 与报告都写着"两个核心二进制 ldd 的 Qt 命中为 0/0"，这里机器核对一次。
+        run: |
+          set -euo pipefail
+          hits=$(ldd build/common/tests/mc_core_tests build/tools/mc_loopback_demo | grep -ci 'qt6' || true)
+          echo "两个核心二进制的 Qt 命中行数：$hits"
+          if [ "$hits" -ne 0 ]; then
+            echo "::error::核心二进制链接到了 Qt，违反 ADR-001"
+            exit 1
+          fi
+
+      - name: 跑端到端演示（无需 Qt 与硬件）
+        run: ./build/tools/mc_loopback_demo
+
+  host:
+    name: Qt6 上位机
+    runs-on: ubuntu-22.04
+    env:
+      # 界面用例与自检本来各自设了 QT_QPA_PLATFORM=offscreen（见 host/CMakeLists.txt），
+      # 这里再兜一层：runner 上没有显示器，任何遗漏都会以"平台插件找不到"的形式炸出来。
+      QT_QPA_PLATFORM: offscreen
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: 安装依赖
+        # libgl-dev 是 Qt6Widgets 的前置（缺它 find_package(OpenGL) 失败，Widgets 一起配不上）；
+        # fonts-noto-cjk 是"中文界面能不能读"的前置（缺它截图里中文全是方框）。
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y cmake g++ libgtest-dev qt6-base-dev libgl-dev fonts-noto-cjk
+
+      - name: 配置
+        run: cmake -S . -B build -DCMAKE_BUILD_TYPE=Debug
+
+      - name: 构建
+        run: cmake --build build -j"$(nproc)"
+
+      - name: 跑测试
+        run: ctest --test-dir build --output-on-failure
+
+      - name: 打印无头自检摘要
+        # ctest 只在失败时打输出；这一步把摘要摆进日志，便于直接看数字。
+        run: ./build/host/mc_host --selftest=3

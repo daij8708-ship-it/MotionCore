@@ -1,0 +1,32 @@
+# 构建产物
+build/
+build-*/
+cmake-build-*/
+CMakeCache.txt
+CMakeFiles/
+compile_commands.json
+*.o
+*.a
+*.so
+*.exe
+*.pdb
+
+# 编辑器 / IDE
+.vscode/
+.idea/
+*.user
+*.userosscache
+*.suo
+
+# 本地只读参考（自带 .git，若纳入版本管理会被外层仓库记成 gitlink）。
+# 仅作对照与追溯，不参与构建。
+original-repo/
+
+# 分析阶段的中间产物
+*.tmp
+
+# Python 运行时快照，非本项目产物
+Python/
+
+# 本地开发计划 —— 只留本地
+docs/development_plan.md
