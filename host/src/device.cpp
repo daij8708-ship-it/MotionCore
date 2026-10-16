@@ -356,6 +356,10 @@ const mc::AckStats& SimulatedDevice::ackStats() const noexcept {
     return (link_ != nullptr) ? link_->host->tracker().stats() : kEmpty;
 }
 
+std::uint64_t SimulatedDevice::telemetryBacklogDropped() const noexcept {
+    return (link_ != nullptr) ? link_->sim.telemetryBacklogDropped() : 0U;
+}
+
 // --- 故障注入 ---------------------------------------------------------------
 
 void SimulatedDevice::setUplinkDropEveryNthByte(std::uint32_t n) {

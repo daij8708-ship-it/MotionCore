@@ -151,8 +151,9 @@ void printReport(mchost::DeviceManager& manager, mchost::MainWindow& window,
     std::printf("（判据失败 %d 条）\n", reportFailures);
 }
 
-// 无头环境下没有窗口系统来投递绘制事件：控件不会自己画。想拿到"曲线控件真的画过"
-// 的证据，只能显式渲染一次。这是自检的取样手段，不是产品运行时的路径。
+// 绘制事件只投递给**当前可见页**，而且由事件循环异步投递 —— 自检里不能假设
+// "曲线页已经画过了"（那几秒它并不是当前页）。要拿到"曲线控件真的画过"的证据，
+// 只能切到那一页并显式渲染一次。这是自检的取样手段，不是产品运行时的路径。
 void forceOneRender(mchost::MainWindow& window) {
     (void)window.showTab(2);
     QApplication::processEvents();

@@ -199,6 +199,11 @@ public:
 
     const std::deque<CommandRecord>& commandLog() const noexcept override { return log_; }
 
+    // 设备侧"欠发"计数（该产但超过单拍上限而丢弃的遥测帧数）。
+    // **刻意不放进 IDevice**：那是模拟器的内部计数器，真实设备不会把它塞进
+    // 遥测帧，放进接口就等于逼所有实现返回一个自己拿不到的数。
+    std::uint64_t telemetryBacklogDropped() const noexcept;
+
     void setUplinkDropEveryNthByte(std::uint32_t n) override;
     void setDownlinkDropEveryNthByte(std::uint32_t n) override;
     void setUplinkLatencyPolls(std::uint32_t n) override;

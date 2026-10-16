@@ -48,6 +48,13 @@ add_executable(mc_host src/main.cpp)
 target_link_libraries(mc_host PRIVATE mc_host_lib)
 target_compile_options(mc_host PRIVATE -Wall -Wextra -Werror)
 
+# 单线程负载实测工具。刻意**不进 ctest**：它的输出是"这台机器上量到多少"，
+# 不是"对不对"—— 拿它当门禁只会得到一个随机器和构建类型飘的红绿。
+# 正确性判据（补发是否真的生效）在单测里，那边是确定的。
+add_executable(mc_host_bench src/bench_main.cpp)
+target_link_libraries(mc_host_bench PRIVATE mc_host_lib)
+target_compile_options(mc_host_bench PRIVATE -Wall -Wextra -Werror)
+
 if(BUILD_TESTING)
     add_subdirectory(tests)
 

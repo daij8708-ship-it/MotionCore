@@ -1,5 +1,6 @@
 #pragma once
 
+#include <cstddef>
 #include <cstdint>
 #include <memory>
 
@@ -57,6 +58,24 @@ public:
 
     const QVector<AlarmRecord>& alarms() const noexcept { return alarms_; }
 
+    // --- 计时诊断（默认关闭，只给压测工具用）---------------------------------
+    //
+    // 记两件事：**这一拍占住调用线程多久**（busy）与**两拍之间实际隔了多久**
+    // （interval）。前者回答"UI 线程够不够用"，后者回答"定时器准不准"。
+    //
+    // 默认关闭是因为它本身有成本（每拍两次 QElapsedTimer 读 + 一次写）——
+    // 常开等于让被测对象替我们分担测量误差。百分位不在产品代码里算：
+    // 这里只如实记样本，怎么统计是测量端的事。
+    void enableTimingDiagnostics(bool enabled, std::size_t capacity = 8192U);
+    bool timingDiagnosticsEnabled() const noexcept { return timingEnabled_; }
+    // 有效样本数 = min(已记拍数, 容量)：报告里能看到的就只有这么多，
+    // 不能给一个"看起来在涨、其实已经绕圈覆盖"的数。
+    std::size_t timingSampleCount() const noexcept {
+        return (timingSampleCount_ < timingCapacity_) ? timingSampleCount_ : timingCapacity_;
+    }
+    const QVector<qint64>& tickBusyUs() const noexcept { return tickBusyUs_; }
+    const QVector<qint64>& tickIntervalUs() const noexcept { return tickIntervalUs_; }
+
     // 每拍固定步长（毫秒）。与设备的遥测周期一致 → 100 Hz。
     static constexpr int kTickIntervalMs = 10;
     // 界面刷新分频：每 5 拍刷一次 = 20 Hz。
@@ -95,15 +114,28 @@ private slots:
 
 private:
     void raiseAlarm(const QString& text);
+    // 一拍的全部工作。计时外壳只负责"什么时候测"，不掺进业务。
+    void tickOnce();
+    void recordTimingSample(qint64 busyUs, qint64 intervalUs);
 
     std::unique_ptr<IDevice> device_;
     TelemetryRing telemetry_;
     QTimer timer_;
     QElapsedTimer clock_;
+    // 单独一个计时器：clock_ 给的是"连接以来的毫秒数"（仿真时钟），
+    // 而拍耗时要用纳秒级的单调读数，两者用途不同，混用会把时钟精度当成了精度上限。
+    QElapsedTimer timingClock_;
 
     bool connected_ = false;
     std::uint64_t ticks_ = 0U;
     double elapsedMs_ = 0.0;
+
+    bool timingEnabled_ = false;
+    QVector<qint64> tickBusyUs_;
+    QVector<qint64> tickIntervalUs_;
+    std::size_t timingCapacity_ = 0U;
+    std::size_t timingSampleCount_ = 0U;
+    qint64 lastTimingTickMs_ = -1;
 
     bool lastFaultLatched_ = false;
     QVector<AlarmRecord> alarms_;

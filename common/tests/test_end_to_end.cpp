@@ -948,3 +948,125 @@ TEST(EndToEnd, LinkFailureTearsDownTheSessionAndReconnectNeverResumesMotion) {
     EXPECT_NEAR(rig.sim.velocityDegPerSec(), 0.0F, 1.0F);
     EXPECT_EQ(rig.sim.runMode(), mc::SimRunMode::Velocity) << "模式是配置，本来就不该被清掉";
 }
+
+// ---------------------------------------------------------------------------
+// 设备侧产帧速率（遥测补发）
+//
+// 真实设备在自己的定时器上产帧，**不会**因为上位机取得晚就少发。所以产帧
+// 必须按设备自己的周期补，而不是"每拍最多一帧" —— 后者的实际帧率会变成
+// 上位机的 tick 率，把链路的能力测成了上位机的取数节奏。
+// ---------------------------------------------------------------------------
+
+TEST(EndToEnd, DeviceEmitsTelemetryOnItsOwnPeriodNotTheHostTickRate) {
+    mc::SimulatorConfig config;
+    config.telemetryPeriodMs = 10U;   // 与 tick 间隔相同：每拍一帧
+    mc::DeviceSimulator fast(config);
+
+    std::uint64_t now = 0U;
+    std::size_t frames = 0U;
+    for (int i = 0; i < 10; ++i) {
+        now += 10U;
+        frames += fast.tick(nullptr, 0U, now).telemetrySent;
+    }
+    // 首拍只用来对齐产帧基准（否则会把"上电之前"也算成产帧时间），故 10 拍得 9 帧。
+    EXPECT_EQ(frames, std::size_t{9});
+
+    mc::SimulatorConfig dense;
+    dense.telemetryPeriodMs = 1U;     // 比 tick 密 10 倍
+    mc::DeviceSimulator stress(dense);
+
+    now = 0U;
+    frames = 0U;
+    for (int i = 0; i < 10; ++i) {
+        now += 10U;
+        frames += stress.tick(nullptr, 0U, now).telemetrySent;
+    }
+    // 这才是有意义的那一半：设备该产 10 倍，就得产 10 倍。
+    EXPECT_EQ(frames, std::size_t{90});
+}
+
+TEST(EndToEnd, DeviceCapsPerTickTelemetryAndCountsWhatItCouldNotHandOver) {
+    mc::SimulatorConfig config;
+    config.telemetryPeriodMs = 1U;
+    mc::DeviceSimulator sim(config);
+
+    ASSERT_TRUE(sim.tick(nullptr, 0U, 0U).telemetrySent == 0U) << "首拍只对齐基准";
+
+    // 中间隔了 100 ms 没人来取：该产 100 帧，但单拍上限是 16 帧。
+    const mc::DeviceSimulator::TickResult stalled = sim.tick(nullptr, 0U, 100U);
+    EXPECT_EQ(stalled.telemetrySent, mc::kMaxTelemetryFramesPerTick);
+    EXPECT_EQ(stalled.telemetryBacklogDropped, 100U - mc::kMaxTelemetryFramesPerTick);
+    EXPECT_EQ(sim.telemetryBacklogDropped(), 100U - mc::kMaxTelemetryFramesPerTick);
+    // 上限必须能被链路一次性搬走：一帧 30 B × 16 = 480 B < 单次交换上限 512 B。
+    EXPECT_LE(mc::kMaxTelemetryFramesPerTick * 30U, 512U);
+
+    // 欠发归欠发，基准已经按整数个周期前进过了 —— 不能因为"上一拍丢了"就
+    // 把丢失的量摊到后面每一拍上，那会让帧率永久性地偏。
+    const mc::DeviceSimulator::TickResult next = sim.tick(nullptr, 0U, 110U);
+    EXPECT_EQ(next.telemetrySent, std::size_t{10});
+    EXPECT_EQ(next.telemetryBacklogDropped, std::size_t{0});
+}
+
+// 周期 0 是"来取就发一帧"。这条用例的价值在**它必须能返回**：
+// 补发循环写的是 `nowMs - lastTelemetryMs_ >= period`，period 为 0 时恒成立，
+// 照补发算就是一个死循环 —— 所以这两条路径必须显式分开。
+TEST(EndToEnd, ZeroTelemetryPeriodMeansOneFramePerTickAndDoesNotSpin) {
+    mc::SimulatorConfig config;
+    config.telemetryPeriodMs = 0U;
+    mc::DeviceSimulator sim(config);
+
+    EXPECT_EQ(sim.tick(nullptr, 0U, 0U).telemetrySent, std::size_t{1});
+    EXPECT_EQ(sim.tick(nullptr, 0U, 10U).telemetrySent, std::size_t{1});
+    EXPECT_EQ(sim.tick(nullptr, 0U, 5000U).telemetrySent, std::size_t{1}) << "隔多久也只发一帧";
+    EXPECT_EQ(sim.telemetryBacklogDropped(), 0ULL);
+}
+
+// 补发不能只在模拟器内部成立：帧得**真的**顺着链路到上位机，
+// 并且上位机要全部解出来（一帧不丢、一帧不拒）。
+TEST(EndToEnd, DenseTelemetryReallyArrivesAtTheHostOverTheLink) {
+    mc::SimulatorConfig config;
+    config.telemetryPeriodMs = 1U;
+    Rig rig(config);
+
+    const mc::HostSession::PumpResult result = rig.run(10U);   // 100 ms
+
+    // 10 拍 × 每拍 10 帧；第 10 拍产出的那一批还在链路上（本拍的读发生在产之前），
+    // 加上握手排空过一轮，故正好 9 拍的量。
+    EXPECT_EQ(result.telemetryAccepted, std::size_t{90});
+    EXPECT_EQ(result.telemetryRejected, std::size_t{0});
+    EXPECT_EQ(result.unexpectedFrames, std::size_t{0});
+    EXPECT_EQ(rig.sim.encodeFailures(), 0ULL);
+    EXPECT_EQ(rig.sim.telemetryBacklogDropped(), 0ULL) << "单拍 10 帧没到上限，不该有欠发";
+}
+
+// 时钟只给到毫秒时，每拍产几帧会在 0 / 1 / 2 之间抖 —— 但**总帧数必须守恒**。
+//
+// 这条是从实测里追出来的：45 s 档某次运行上位机收了 4469 帧，而显示缓冲只写进
+// 3856 条（差值不是丢帧，见下）。上位机把 `QElapsedTimer::elapsed()` 的整毫秒数
+// 当 tick 时刻传下来，于是 dt 的真实值就带上了 ±1 ms 的量化抖动：
+//   t=10 → 该产 1 帧，产 1；t=19（只走了 9 ms）→ 一帧都不该产，产 0；
+//   t=30（这回一次走了 11 ms）→ 该产 2 帧，产 2。
+// 一条 9 ms 的步长会让某一拍收不到帧，随后的 11 ms 步长又把这笔补回来。
+// 关键是**平均恒为 1.000 帧/拍**：协议侧一帧不丢，只是"上位机哪一拍读到"不同 ——
+// 而显示缓冲是"一拍只收最后一帧"，所以它的写入条数会略少于收帧数。
+TEST(EndToEnd, MillisecondQuantizedClockDithersTheFrameCountWithoutLosingAny) {
+    mc::SimulatorConfig config;
+    config.telemetryPeriodMs = 10U;
+    mc::DeviceSimulator sim(config);
+
+    // 真实间隔 10 ms，但读数被量化成 10 / 9 / 11 / 11 / 11 / 11（首拍用于对齐基准）。
+    const std::uint64_t ticks[] = {0U, 10U, 19U, 30U, 41U, 52U, 63U};
+    const std::size_t expected[] = {0U, 1U, 0U, 2U, 1U, 1U, 1U};
+
+    std::size_t total = 0U;
+    for (std::size_t i = 0U; i < 7U; ++i) {
+        const std::size_t sent = sim.tick(nullptr, 0U, ticks[i]).telemetrySent;
+        EXPECT_EQ(sent, expected[i]) << "第 " << i << " 拍（t=" << ticks[i] << " ms）";
+        total += sent;
+    }
+
+    // 守恒：首拍（t=0）只用于对齐基准，此后跨度 63 ms，10 ms 一个周期 →
+    // 必须**恰好**产 6 帧。抖的是"哪一拍产"，不是"总共产多少"。
+    EXPECT_EQ(total, std::size_t{6}) << "63 ms / 10 ms = 6 帧，与抖动无关";
+    EXPECT_EQ(sim.telemetryBacklogDropped(), 0ULL);
+}

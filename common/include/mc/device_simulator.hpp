@@ -47,9 +47,18 @@ static_assert(static_cast<std::uint8_t>(SimRunMode::Position) == kMaxRunMode,
 // 32 条命令的跨度远超该窗口，再大只是白占内存。
 inline constexpr std::size_t kSimulatorDedupWindowSize = 32U;
 
+// 单拍最多产多少帧遥测。这是**链路约束倒推出来的**，不是拍的数：
+// 一帧遥测 30 B，上位机单拍最多读 kMaxBytesPerExchange = 512 B，
+// 16 × 30 = 480 B 留出了应答帧的余量。超过上限的部分丢弃并计数 ——
+// 静默丢弃会让"设备欠着没发"和"上位机没读走"这两件事再也分不清。
+inline constexpr std::size_t kMaxTelemetryFramesPerTick = 16U;
+
 struct SimulatorConfig {
     float maxVelocityDegPerSec = 384.0F;   // 与上位机的量程一致
     float accelDegPerSec2 = 1200.0F;
+    // 设备**自己**的产帧周期（毫秒）。上位机取得晚，设备不会因此少发：
+    // 每次来取都把这段时间该发的帧补出来（上限见 kMaxTelemetryFramesPerTick）。
+    // 0 是特例：不做补发，来取就发一帧（照补发算会变成死循环）。
     std::uint32_t telemetryPeriodMs = 10U; // 100 Hz
     std::uint16_t pwmFullScale = 99U;      // 对应固件定时器的 ARR = 99
 
@@ -78,10 +87,12 @@ public:
         std::size_t unknownTypes = 0;
         std::size_t malformedPayloads = 0;
         std::size_t duplicatesSuppressed = 0;   // 判为重传、只重放应答未重复执行的帧数
+        std::size_t telemetryBacklogDropped = 0; // 本拍因超过上限而丢弃的待发遥测帧数
         bool commLossFaulted = false;           // 本拍因通信丢失进入 Fault（F7）
     };
 
-    // 推进一个 tick：先积分运动，再处理收到的字节，再做安全检查，最后决定是否上报遥测。
+    // 推进一个 tick：先积分运动，再处理收到的字节，再做安全检查，
+    // 最后按设备自己的周期补发这段时间该发的遥测。
     TickResult tick(const std::uint8_t* incoming, std::size_t len, std::uint64_t nowMs);
 
     // 取出本设备待发出的字节。
@@ -116,6 +127,11 @@ public:
 
     Telemetry lastTelemetry() const noexcept { return lastTelemetry_; }
 
+    // 因超过单拍产帧上限而被丢弃的累计帧数。
+    // 它非 0 只说明"上位机取得太慢"，不是设备故障 —— 但必须看得到：
+    // 否则上位机侧的丢帧统计会背上不属于它的账。
+    std::uint64_t telemetryBacklogDropped() const noexcept { return telemetryBacklogDropped_; }
+
     // 把状态机事件喂进来（链路层、故障检测、以及测试都走这一个窄口）。
     // 刻意只开这一个口，而不是把 DeviceStateMachine& 整个暴露出去 ——
     // 否则"谁能改状态"就说不清了。
@@ -148,6 +164,8 @@ private:
     void rememberReply(MessageType type, std::uint16_t seq, const Reply& reply);
     const DedupEntry* findRecent(MessageType type, std::uint16_t seq) const noexcept;
     void emitTelemetry(TickResult& result);
+    // 按 telemetryPeriodMs 把这一拍该产的帧补出来（上限 kMaxTelemetryFramesPerTick）。
+    void emitDueTelemetry(std::uint64_t nowMs, TickResult& result);
     void queueFrame(MessageType type, std::uint16_t seq, const std::vector<std::uint8_t>& payload);
     void queueAck(MessageType ackType, std::uint16_t seq, TickResult& result);
     void queueNack(std::uint16_t rejectedSeq, NackReason reason, TickResult& result);
@@ -181,6 +199,7 @@ private:
     std::vector<Nack> nacksSent_;
     std::uint16_t outboundSeq_ = 0U;
     std::uint64_t encodeFailures_ = 0U;
+    std::uint64_t telemetryBacklogDropped_ = 0U;
 };
 
 }  // namespace mc

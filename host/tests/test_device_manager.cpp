@@ -226,4 +226,37 @@ TEST_F(DeviceManagerTest, BufferedTelemetryCarriesTheDeviceValuesNotZeros) {
     EXPECT_EQ(newest.faultCode, 0U);
 }
 
+TEST_F(DeviceManagerTest, TimingDiagnosticsIsOffByDefaultAndRecordsOnlyWhenAsked) {
+    // 默认关闭：产品路径上一个样本都不该有。诊断本身要读两次单调时钟，
+    // 常开等于让被测对象替我们分担测量误差。
+    EXPECT_FALSE(manager_->timingDiagnosticsEnabled());
+    EXPECT_EQ(manager_->timingSampleCount(), 0U);
+
+    ASSERT_TRUE(connectAndWaitReady());
+    mchost_test::pumpFor(200);
+    EXPECT_EQ(manager_->timingSampleCount(), 0U) << "没开诊断却记了样本";
+    EXPECT_TRUE(manager_->tickBusyUs().isEmpty());
+
+    // 容量 16：拍数超过它之后，样本数必须**封顶**而不是无界增长。
+    manager_->enableTimingDiagnostics(true, 16U);
+    ASSERT_TRUE(mchost_test::waitUntil([this]() { return manager_->timingSampleCount() >= 16U; }));
+    mchost_test::pumpFor(200);
+    EXPECT_EQ(manager_->timingSampleCount(), 16U);
+    EXPECT_EQ(manager_->tickBusyUs().size(), 16);
+    EXPECT_EQ(manager_->tickIntervalUs().size(), 16);
+    EXPECT_GT(manager_->ticks(), 20U) << "拍数确实超过了容量，否则封顶这件事根本没被验到";
+
+    // 拍间隔样本得是"一拍"的量级（kTickIntervalMs = 10 ms）：
+    // 定时器真的在按 10 ms 跑，而不是量到了一堆 0 或一堆毫秒以外的数。
+    EXPECT_GE(manager_->tickIntervalUs().at(0), 5000);
+    EXPECT_GT(manager_->tickBusyUs().at(0), 0);
+
+    // 关掉之后必须真的不再写：不是"开关是假的、一直在记"。
+    manager_->enableTimingDiagnostics(false);
+    EXPECT_TRUE(manager_->tickBusyUs().isEmpty());
+    EXPECT_EQ(manager_->timingSampleCount(), 0U);
+    mchost_test::pumpFor(100);
+    EXPECT_EQ(manager_->timingSampleCount(), 0U);
+}
+
 }  // namespace

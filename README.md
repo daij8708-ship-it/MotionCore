@@ -23,9 +23,11 @@
 每条命令在记录表里留下带归宿的结果）；数据曲线页（速度 / 位置 / 目标三条曲线，min/max 分桶
 抽稀 + 定频刷新，各用独立纵轴）；会话生命周期（自动握手、一轮失败退避重开、链路失效后自动重连）。
 
-**验证手段**：**166 条自动化测试**（协议核心 134 + 上位机 31 + 无头自检 1，其中 24 条端到端）；
+**验证手段**：**172 条自动化测试**（协议核心 139 + 上位机 32 + 无头自检 1，其中 29 条端到端）；
 进程内回环链路与故障注入（断开上行 / 断开下行 / 丢字节 / 损坏 / 延迟）；六种链路条件下的
-端到端演示程序（`tools/mc_loopback_demo`，无需 Qt 与硬件）。详见 `docs/TEST_REPORT.md`。
+端到端演示程序（`tools/mc_loopback_demo`，无需 Qt 与硬件）；单线程负载实测工具
+（`host/mc_host_bench`，可把设备产帧周期设成 1 ms 造 10 倍压力）。详见
+`docs/TEST_REPORT.md` 与 `docs/PERF.md`。
 
 ## 目录结构
 
@@ -37,17 +39,18 @@
 │   │                       transport / loopback_transport / host_session /
 │   │                       link_monitor / device_simulator / device_state / ring_buffer
 │   ├── src/
-│   └── tests/              GoogleTest（11 个测试套、134 条用例，含 24 条端到端）
+│   └── tests/              GoogleTest（11 个测试套、139 条用例，含 29 条端到端）
 ├── host/                   Qt6 上位机（五层结构，单向依赖 libmc_core）
 │   ├── include/mc_host/    device（层 4 设备抽象）/ device_manager（层 2 应用服务）/
 │   │                       telemetry_ring + curve_model（层 5 数据）/ ui/（层 1 界面）
-│   ├── src/                含 main.cpp（--selftest 无头自检入口）
-│   └── tests/              3 个测试套、31 条用例（含 7 条界面冒烟）
+│   ├── src/                含 main.cpp（--selftest 无头自检入口）与 bench_main.cpp（负载实测）
+│   └── tests/              3 个测试套、32 条用例（含 7 条界面冒烟）
 ├── tools/
 │   └── loopback_demo.cpp   上位机 ↔ 虚拟设备的端到端演示（可运行，无需 Qt 与硬件）
 └── docs/
     ├── PROTOCOL.md                通信协议 v1（已冻结）
-    └── TEST_REPORT.md             测试报告（含变异测试）
+    ├── TEST_REPORT.md             测试报告（含变异测试）
+    └── PERF.md                    性能基线（单线程负载实测：条件、复现命令、未覆盖面）
 ```
 
 > 通信层（第 3 层）在 `host/` 里**没有新文件**：`mc::HostSession` + `mc::ITransport` 就是通信层本身，
@@ -86,7 +89,7 @@ cmake --build build -j"$(nproc)"
 ctest --test-dir build --output-on-failure
 ```
 
-`ctest` 会逐条列出每个 `TEST`（当前 **166 条** = 协议核心 134 + 上位机 31 + 无头自检 1）。
+`ctest` 会逐条列出每个 `TEST`（当前 **172 条** = 协议核心 139 + 上位机 32 + 无头自检 1）。
 直接运行测试二进制可看 gtest 自己的汇总：
 
 ```bash
@@ -147,6 +150,21 @@ QT_QPA_PLATFORM=offscreen ./build/host/mc_host --selftest=5 --shot-prefix=/tmp/s
 
 > 若源码放在 `/mnt/c/...` 下，建议先拷到 WSL 的 ext4（如 `~/mc`）再构建，
 > 避免跨文件系统的 I/O 开销与权限问题。
+
+### 测单线程负载（性能基线）
+
+上位机的界面刷新、取窗抽稀、收帧解码全在**同一个线程**上跑。这条基线就是量它有多少余量：
+
+```bash
+cmake -S . -B build-rel -DCMAKE_BUILD_TYPE=Release
+cmake --build build-rel -j"$(nproc)"
+QT_QPA_PLATFORM=offscreen ./build-rel/host/mc_host_bench --seconds=5
+```
+
+它把设备侧的产帧周期设成 10 ms（与 tick 同频）与 1 ms（10 倍压力）两档各跑一遍，
+打印每拍处理耗时与拍间隔的 P50/P95/P99、界面刷新成本、整页绘制成本、实测帧率与环形缓冲覆盖数。
+**它刻意不进 `ctest`** —— 它回答的是"在这台机器上量到多少"，不是"对不对"。
+实测数字、测量条件、复现命令与未覆盖面见 `docs/PERF.md`。
 
 ### 持续集成
 
@@ -217,11 +235,14 @@ QT_QPA_PLATFORM=offscreen ./build/host/mc_host --selftest=5 --shot-prefix=/tmp/s
 唯一的例外是 `STOP`：它只要求链路开着，会话没就绪也允许发 —— 把手动停车挡在一个"未就绪"
 的会话后面，恰恰是最危险的时刻。
 
-**界面刷新是单线程定频的，这是有意的。** 遥测 100 Hz 进环形缓冲，界面按 20 Hz
+**界面刷新是单线程定频的，这是有意的，而且余量已经实测。** 遥测进环形缓冲，界面按 20 Hz
 （`kUiRefreshDivider = 5`）取窗、抽稀、重绘。让 100 Hz 的数据直接驱动 100 Hz 的重绘，
-是把 CPU 花在看不见的差别上；而先立住"单线程 + 定频刷新"这条**基线**，性能优化才拿得出
-"优化前后"的实测对比 —— 没有基线，性能数字就没有参照物。曲线页把"缓冲条数 / 本拍画出点数 / tick 次数 /
-重绘次数"并排显示，节流有没有生效一眼可查。
+是把 CPU 花在看不见的差别上。这条"单线程 + 定频刷新"的**基线已经量出来**
+（`docs/PERF.md`）：设备侧产 1 kHz 遥测、环形缓冲写满的最坏一档下，跨 7 次运行每拍处理耗时
+P50 14–19 µs、P99 ≤ 473 µs、单拍最大 944 µs —— 按最坏观测值也只有 10 ms 拍预算的 9.4%，
+拍间隔稳在 10.0–11.0 ms，单核占用约 6%。**四条"该考虑拆线程"的门槛一条都没触到，
+所以当前不开线程** —— 先有基线再谈优化，且不拿线程安全的复杂度去换一个量不出来的收益。
+曲线页把"缓冲条数 / 本拍画出点数 / tick 次数 / 重绘次数"并排显示，节流有没有生效一眼可查。
 
 **曲线抽稀用 min/max 分桶，不是等间隔取样。** 等间隔取样会让一闪而过的尖峰从图上消失，
 而尖峰（过速、限位、故障前的抖动）恰恰是监控最该看见的东西。每桶保留极小与极大，

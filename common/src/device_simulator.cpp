@@ -63,12 +63,45 @@ DeviceSimulator::TickResult DeviceSimulator::tick(const std::uint8_t* incoming, 
 
     runSafetyChecks(nowMs, result);
 
-    if (nowMs - lastTelemetryMs_ >= config_.telemetryPeriodMs) {
-        lastTelemetryMs_ = nowMs;
-        emitTelemetry(result);
-    }
+    emitDueTelemetry(nowMs, result);
 
     return result;
+}
+
+void DeviceSimulator::emitDueTelemetry(std::uint64_t nowMs, TickResult& result) {
+    const std::uint64_t period = config_.telemetryPeriodMs;
+    if (period == 0U) {
+        // 周期 0 必须显式分开写，不能让它落进下面的补发公式：那里的除法会
+        // **整数除零**（变异 M33 实测：去掉这个分支，用例当场 SIGFPE 崩溃）。
+        // 语义定为"来取就发一帧"。
+        lastTelemetryMs_ = nowMs;
+        emitTelemetry(result);
+        return;
+    }
+
+    const std::uint64_t due = (nowMs - lastTelemetryMs_) / period;
+    if (due == 0U) {
+        return;
+    }
+
+    // 基准按**整数个周期**前进，而不是直接跳到 nowMs。
+    // 跳到 nowMs 会把"不足一个周期的那点零头"吃掉，长期看就是帧数偏少；
+    // 按周期前进则零头一直留着，累计误差恒小于一个周期。
+    lastTelemetryMs_ += due * period;
+
+    if (due > static_cast<std::uint64_t>(kMaxTelemetryFramesPerTick)) {
+        const std::uint64_t dropped = due - static_cast<std::uint64_t>(kMaxTelemetryFramesPerTick);
+        telemetryBacklogDropped_ += dropped;
+        result.telemetryBacklogDropped = static_cast<std::size_t>(dropped);
+    }
+
+    const std::uint64_t toSend = std::min(due, static_cast<std::uint64_t>(kMaxTelemetryFramesPerTick));
+    // 补发的这几帧内容相同：运动模型一拍只积分一次，帧之间没有新的采样点。
+    // 它们的作用是**帧率压力**（解码、缓冲、绘制的负载），不代表真实设备那种
+    // 每个采样点都不同的遥测密度 —— 引用这些数字时必须带上这句。
+    for (std::uint64_t i = 0U; i < toSend; ++i) {
+        emitTelemetry(result);
+    }
 }
 
 void DeviceSimulator::integrate(std::uint64_t nowMs) {
