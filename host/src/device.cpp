@@ -34,6 +34,20 @@ const char* nackReasonName(mc::NackReason reason) noexcept {
     return "?";
 }
 
+const char* openErrorName(OpenError error) noexcept {
+    switch (error) {
+        case OpenError::None:             return "无";
+        case OpenError::NoPortSelected:   return "没有选择端口";
+        case OpenError::NotFound:         return "找不到端口（设备没插上，或名字写错了）";
+        case OpenError::BusyOrOccupied:   return "端口打不开或已被占用（另一个程序正开着它？）";
+        case OpenError::PermissionDenied: return "权限不足（Linux 上通常要把用户加进 dialout 组）";
+        case OpenError::Unsupported:      return "本平台/驱动不支持该串口参数组合";
+        case OpenError::TransportError:   return "端口读写出错（线被拔了？）";
+        case OpenError::Unknown:          return "未知原因";
+    }
+    return "?";
+}
+
 SimulatedDevice::Link::Link(const mc::SimulatorConfig& simConfig,
                             const mc::LinkMonitor::Config& monitorConfig)
     : host(std::make_unique<mc::HostSession>(*pair.host)), sim(simConfig) {
@@ -49,12 +63,13 @@ SimulatedDevice::SimulatedDevice(mc::SimulatorConfig simConfig,
 
 SimulatedDevice::~SimulatedDevice() = default;
 
-void SimulatedDevice::open() {
+bool SimulatedDevice::open() {
     if (link_ != nullptr) {
-        return;
+        return true;
     }
     link_ = std::make_unique<Link>(simConfig_, monitorConfig_);
     nacksSeen_ = 0U;
+    return true;
 }
 
 void SimulatedDevice::close() {
@@ -399,5 +414,394 @@ void SimulatedDevice::clearInjectedFaults() {
         link_->pair.device->outgoingFaults() = mc::LinkFaultConfig{};
     }
 }
+
+// ===========================================================================
+// SerialDevice
+// ===========================================================================
+
+SerialDevice::SerialDevice(SerialTransport::Config config, mc::LinkMonitor::Config monitorConfig)
+    : transportConfig_(std::move(config)), monitorConfig_(monitorConfig) {}
+
+SerialDevice::~SerialDevice() = default;
+
+const char* SerialDevice::configSummary() const noexcept {
+    summaryUtf8_ = QStringLiteral("%1 @ %2 baud, %3%4%5%6")
+                       .arg(transportConfig_.portName, QString::number(transportConfig_.baudRate),
+                            QString::number(transportConfig_.dataBits),
+                            transportConfig_.parity == SerialTransport::Config::Parity::None
+                                ? QStringLiteral("N")
+                            : transportConfig_.parity == SerialTransport::Config::Parity::Even
+                                ? QStringLiteral("E")
+                                : QStringLiteral("O"),
+                            QString::number(transportConfig_.stopBits),
+                            transportConfig_.hardwareFlowControl ? QStringLiteral("+RTS/CTS")
+                                                                 : QString())
+                       .toUtf8();
+    return summaryUtf8_.constData();
+}
+
+bool SerialDevice::open() {
+    if (host_ != nullptr) {
+        return true;
+    }
+
+    openError_ = OpenError::None;
+
+    transport_ = std::make_unique<SerialTransport>(transportConfig_);
+    if (!transport_->open()) {
+        // 把 QSerialPort 的错误码翻成本层的令牌：界面只需要知道"该去查哪一类原因"，
+        // 不需要认识 Qt 的错误枚举（那是本层的实现细节）。
+        switch (transport_->lastSystemError()) {
+            case QSerialPort::DeviceNotFoundError: openError_ = OpenError::NotFound; break;
+            case QSerialPort::PermissionError:     openError_ = OpenError::PermissionDenied; break;
+            case QSerialPort::OpenError:
+            case QSerialPort::ResourceError:       openError_ = OpenError::BusyOrOccupied; break;
+            case QSerialPort::UnsupportedOperationError: openError_ = OpenError::Unsupported; break;
+            case QSerialPort::WriteError:
+            case QSerialPort::ReadError:           openError_ = OpenError::TransportError; break;
+            default:                               openError_ = OpenError::Unknown; break;
+        }
+        transport_.reset();
+        return false;
+    }
+
+    host_ = std::make_unique<mc::HostSession>(*transport_);
+    // 心跳 / 握手 / 命令共用一个计数器（与模拟器同一条理由：AckTracker 只按 seq 判重）。
+    host_->enableLinkMonitor(monitorConfig_, [this]() { return seq_++; });
+    host_->enableHandshake([this]() { return seq_++; });
+
+    nacksSeen_ = 0U;
+    hasTelemetry_ = false;
+    log_.clear();
+    modeRequests_.clear();
+    hasAckedMode_ = false;   // 新会话还没确认过任何模式
+    return true;
+}
+
+void SerialDevice::close() {
+    if (host_ == nullptr) {
+        return;
+    }
+
+    // 与模拟器同样的规则：断开时把在途命令按超时结清。
+    // 一条没被确认的运动指令不能因为"我关了端口"就变成没发生过。
+    for (CommandRecord& record : log_) {
+        if (record.status == CommandStatus::Awaiting) {
+            record.status = CommandStatus::TimedOut;
+        }
+    }
+
+    host_.reset();
+    if (transport_ != nullptr) {
+        transport_->close();
+        transport_.reset();
+    }
+    nacksSeen_ = 0U;
+    hasAckedMode_ = false;
+}
+
+DeviceTick SerialDevice::tick(std::uint64_t nowMs) {
+    DeviceTick out;
+    if (host_ == nullptr) {
+        return out;   // linkOpen 恒为 false
+    }
+
+    lastTickMs_ = nowMs;
+
+    const mc::HostSession::PumpResult hostSide = host_->pump(nowMs);
+    settleCommands(hostSide);
+
+    out.commandLogChanged = logDirty_;
+    logDirty_ = false;
+
+    out.linkOpen = transport_ != nullptr && transport_->isOpen();
+    out.sessionReady = host_->sessionReady();
+    out.sessionLost = hostSide.sessionLost;
+    out.handshakeCompleted = hostSide.handshakeCompleted;
+    out.handshakeRounds = host_->handshakeRounds();
+
+    out.telemetryAccepted = hostSide.telemetryAccepted;
+    out.telemetryRejected = hostSide.telemetryRejected;
+    if (hostSide.telemetryAccepted > 0U) {
+        // 遥测是**唯一的**回读来源，因此本类把它留下来自己也要用一份。
+        lastTelemetry_ = host_->lastTelemetry();
+        hasTelemetry_ = true;
+        out.hasTelemetry = true;
+        out.telemetry = lastTelemetry_;
+    }
+
+    out.acksMatched = hostSide.acksMatched;
+    out.naksReceived = hostSide.naksReceived;
+    out.unexpectedFrames = hostSide.unexpectedFrames;
+    out.droppedProbes = hostSide.droppedProbes;
+    for (const mc::TimeoutEvent& event : hostSide.timeouts) {
+        if (event.outcome == mc::TxOutcome::Fault) {
+            ++out.timeoutsFaulted;
+        } else if (event.outcome == mc::TxOutcome::Retry) {
+            ++out.timeoutsRetried;
+        }
+    }
+
+    out.linkDown = hostSide.linkDown;
+    out.ackTimeoutMs = hostSide.ackTimeoutMs;
+    return out;
+}
+
+// --- 命令 -------------------------------------------------------------------
+//
+// 前置条件与模拟器一致：会话未就绪就不发（那不是替设备做门禁，而是别发一条
+// 注定被拒的东西）；STOP 例外，链路开着就发。
+
+bool SerialDevice::recordCommand(const char* name, std::uint16_t seq, bool sent,
+                                 std::uint8_t mode) {
+    CommandRecord record;
+    record.name = name;
+    record.seq = seq;
+    record.sentAtMs = sent ? lastTickMs_ : 0U;
+    record.status = sent ? CommandStatus::Awaiting : CommandStatus::NotSent;
+    log_.push_front(record);
+    if (log_.size() > kMaxLogEntries) {
+        log_.pop_back();
+    }
+    if (sent && mode != 0xFFU) {
+        modeRequests_.push_back(ModeRequest{seq, mode});
+    }
+    logDirty_ = true;
+    return sent;
+}
+
+bool SerialDevice::setMode(std::uint8_t mode) {
+    if (host_ == nullptr || !host_->sessionReady()) {
+        return recordCommand("SET_MODE", 0U, false);
+    }
+    const std::uint16_t seq = seq_++;
+    return recordCommand("SET_MODE", seq, host_->sendSetMode(mode, seq, lastTickMs_), mode);
+}
+
+bool SerialDevice::start() {
+    if (host_ == nullptr || !host_->sessionReady()) {
+        return recordCommand("START", 0U, false);
+    }
+    const std::uint16_t seq = seq_++;
+    return recordCommand("START", seq, host_->sendStart(seq, lastTickMs_));
+}
+
+bool SerialDevice::stop() {
+    if (host_ == nullptr) {
+        return recordCommand("STOP", 0U, false);
+    }
+    const std::uint16_t seq = seq_++;
+    const bool sent = host_->sendStop(seq);
+
+    CommandRecord record;
+    record.name = "STOP";
+    record.seq = seq;
+    record.sentAtMs = lastTickMs_;
+    // STOP 单向（ADR-004）：没有应答可等，"已发出"就是它的终点。
+    record.status = sent ? CommandStatus::Unidirectional : CommandStatus::NotSent;
+    log_.push_front(record);
+    if (log_.size() > kMaxLogEntries) {
+        log_.pop_back();
+    }
+    logDirty_ = true;
+    return sent;
+}
+
+bool SerialDevice::setTarget(float target) {
+    if (host_ == nullptr || !host_->sessionReady()) {
+        return recordCommand("SET_TARGET", 0U, false);
+    }
+    const std::uint16_t seq = seq_++;
+    return recordCommand("SET_TARGET", seq, host_->sendSetTarget(target, seq, lastTickMs_));
+}
+
+bool SerialDevice::setPid(const mc::SetPid& pid) {
+    if (host_ == nullptr || !host_->sessionReady()) {
+        return recordCommand("SET_PID", 0U, false);
+    }
+    const std::uint16_t seq = seq_++;
+    return recordCommand("SET_PID", seq, host_->sendSetPid(pid, seq, lastTickMs_));
+}
+
+bool SerialDevice::clearFault(mc::FaultCode code) {
+    if (host_ == nullptr || !host_->sessionReady()) {
+        return recordCommand("CLEAR_FAULT", 0U, false);
+    }
+    const std::uint16_t seq = seq_++;
+    return recordCommand(
+        "CLEAR_FAULT", seq,
+        host_->sendClearFault(static_cast<std::uint8_t>(code), seq, lastTickMs_));
+}
+
+CommandRecord* SerialDevice::findAwaiting(std::uint16_t seq) {
+    for (CommandRecord& record : log_) {
+        if (record.seq == seq && record.status == CommandStatus::Awaiting) {
+            return &record;
+        }
+    }
+    return nullptr;
+}
+
+void SerialDevice::settleCommands(const mc::HostSession::PumpResult& hostSide) {
+    // ① 新到的 NAK —— 对端明确拒绝，命令到此为止。
+    const std::vector<mc::Nack>& nacks = host_->receivedNacks();
+    for (; nacksSeen_ < nacks.size(); ++nacksSeen_) {
+        CommandRecord* record = findAwaiting(nacks[nacksSeen_].rejectedSeq);
+        if (record != nullptr) {
+            record->status = CommandStatus::Nacked;
+            record->nackReason = nacks[nacksSeen_].reason;
+            logDirty_ = true;
+        }
+        // 被拒的 SET_MODE：它没有生效，也就不该留下任何"当前模式"的痕迹。
+        for (auto it = modeRequests_.begin(); it != modeRequests_.end();) {
+            it = (it->seq == nacks[nacksSeen_].rejectedSeq) ? modeRequests_.erase(it) : it + 1;
+        }
+    }
+
+    // ② 本拍的超时事件（只认 Fault；Retry 表示还会重发，Dropped 是心跳漏拍）。
+    for (const mc::TimeoutEvent& event : hostSide.timeouts) {
+        if (event.outcome != mc::TxOutcome::Fault) {
+            continue;
+        }
+        CommandRecord* record = findAwaiting(event.seq);
+        if (record != nullptr) {
+            record->status = CommandStatus::TimedOut;
+            logDirty_ = true;
+        }
+        for (auto it = modeRequests_.begin(); it != modeRequests_.end();) {
+            it = (it->seq == event.seq) ? modeRequests_.erase(it) : it + 1;
+        }
+    }
+
+    // ③ 剩下的仍在"等待应答"、却已经不在等待表里的 —— 它是被应答了。
+    for (CommandRecord& record : log_) {
+        if (record.status != CommandStatus::Awaiting) {
+            continue;
+        }
+        if (!host_->tracker().isPending(record.seq)) {
+            record.status = CommandStatus::Acked;
+            logDirty_ = true;
+
+            // SET_MODE 被确认 = 设定值真的落地了，此时它才可以回答"设备是什么模式"。
+            for (auto it = modeRequests_.begin(); it != modeRequests_.end();) {
+                if (it->seq == record.seq) {
+                    ackedMode_ = it->mode;
+                    hasAckedMode_ = true;
+                    it = modeRequests_.erase(it);
+                } else {
+                    ++it;
+                }
+            }
+        }
+    }
+}
+
+// --- 只读观测（全部来自遥测或"已确认的设定值"）------------------------------
+
+bool SerialDevice::sessionReady() const noexcept {
+    return host_ != nullptr && host_->sessionReady();
+}
+
+std::uint64_t SerialDevice::handshakeRounds() const noexcept {
+    return (host_ != nullptr) ? host_->handshakeRounds() : 0U;
+}
+
+mc::DeviceState SerialDevice::deviceState() const noexcept {
+    if (!hasTelemetry_) {
+        // 还没收到过遥测就不能猜：链路开着但设备状态未知，如实报 Disconnected
+        // （= 没有可用会话），而不是报一个看起来正常的 Ready。
+        return mc::DeviceState::Disconnected;
+    }
+    return static_cast<mc::DeviceState>(lastTelemetry_.state);
+}
+
+bool SerialDevice::faultLatched() const noexcept {
+    if (!hasTelemetry_) {
+        return false;
+    }
+    // 设备在回 Ready 时会把 faultCode 清成 0，所以"码非 0 且不在 Ready"
+    // 就是锁存着 —— 这是设备状态机的不变式在遥测上的投影，不是第二套规则。
+    return lastTelemetry_.faultCode != 0U &&
+           lastTelemetry_.state != static_cast<std::uint8_t>(mc::DeviceState::Ready);
+}
+
+mc::FaultCode SerialDevice::faultCode() const noexcept {
+    return static_cast<mc::FaultCode>(lastTelemetry_.faultCode);
+}
+
+mc::SimRunMode SerialDevice::runMode() const noexcept {
+    // 没有回读就是没有回读：只报**被确认过**的设定值，一次都没确认过就报"停止控制"。
+    return hasAckedMode_ ? static_cast<mc::SimRunMode>(ackedMode_) : mc::SimRunMode::Stopped;
+}
+
+bool SerialDevice::enabled() const noexcept {
+    const mc::DeviceState state = deviceState();
+    return state == mc::DeviceState::Running || state == mc::DeviceState::Stopping;
+}
+
+float SerialDevice::velocityDegPerSec() const noexcept { return lastTelemetry_.velocityDegPerSec; }
+float SerialDevice::positionDeg() const noexcept { return lastTelemetry_.positionDeg; }
+float SerialDevice::deviceTarget() const noexcept { return lastTelemetry_.target; }
+
+bool SerialDevice::linkDown() const noexcept {
+    return host_ != nullptr && host_->linkMonitor() != nullptr && host_->linkMonitor()->linkDown();
+}
+
+std::uint64_t SerialDevice::ackTimeoutMs() const noexcept {
+    return (host_ != nullptr) ? host_->tracker().timeoutMs() : 0U;
+}
+
+bool SerialDevice::hasRttSample() const noexcept {
+    return linkStats() != nullptr && linkStats()->rttSamples > 0U;
+}
+
+std::uint64_t SerialDevice::rttP95Ms() const noexcept {
+    const mc::LinkMonitor* monitor = (host_ != nullptr) ? host_->linkMonitor() : nullptr;
+    if (monitor == nullptr) {
+        return 0U;
+    }
+    const std::optional<std::uint64_t> rtt = monitor->rttP95Ms();
+    return rtt.has_value() ? *rtt : 0U;
+}
+
+const mc::LinkMonitor::Stats* SerialDevice::linkStats() const noexcept {
+    const mc::LinkMonitor* monitor = (host_ != nullptr) ? host_->linkMonitor() : nullptr;
+    return (monitor != nullptr) ? &monitor->stats() : nullptr;
+}
+
+std::uint64_t SerialDevice::framesSent() const noexcept {
+    return (host_ != nullptr) ? host_->framesSent() : 0U;
+}
+
+std::uint64_t SerialDevice::hostEncodeFailures() const noexcept {
+    return (host_ != nullptr) ? host_->encodeFailures() : 0U;
+}
+
+std::uint64_t SerialDevice::hostSendFailures() const noexcept {
+    return (host_ != nullptr) ? host_->sendFailures() : 0U;
+}
+
+std::uint64_t SerialDevice::telemetryAcceptedTotal() const noexcept {
+    return (host_ != nullptr) ? host_->telemetryAccepted() : 0U;
+}
+
+std::uint64_t SerialDevice::telemetryRejectedTotal() const noexcept {
+    return (host_ != nullptr) ? host_->telemetryRejected() : 0U;
+}
+
+const mc::StreamDecoder::Stats& SerialDevice::decoderStats() const noexcept {
+    static const mc::StreamDecoder::Stats kEmpty{};
+    return (host_ != nullptr) ? host_->decoder().stats() : kEmpty;
+}
+
+const mc::AckStats& SerialDevice::ackStats() const noexcept {
+    static const mc::AckStats kEmpty{};
+    return (host_ != nullptr) ? host_->tracker().stats() : kEmpty;
+}
+
+void SerialDevice::setUplinkDropEveryNthByte(std::uint32_t) {}
+void SerialDevice::setDownlinkDropEveryNthByte(std::uint32_t) {}
+void SerialDevice::setUplinkLatencyPolls(std::uint32_t) {}
+void SerialDevice::clearInjectedFaults() {}
 
 }  // namespace mchost

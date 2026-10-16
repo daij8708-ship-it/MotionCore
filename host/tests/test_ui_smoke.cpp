@@ -126,16 +126,17 @@ TEST_F(UiSmokeTest, TheSimulatedDataSourceIsLabelledInTheBannerAndTheStatusBar) 
 TEST_F(UiSmokeTest, TheWindowOffersTheDesignedPagesAndRejectsAnOutOfRangeTab) {
     QTabWidget* tabs = window_->tabs();
     ASSERT_NE(tabs, nullptr);
-    EXPECT_EQ(tabs->count(), 6);
+    EXPECT_EQ(tabs->count(), 7);
     EXPECT_EQ(tabs->tabText(0), QStringLiteral("设备总览"));
     EXPECT_EQ(tabs->tabText(1), QStringLiteral("运动控制"));
     EXPECT_EQ(tabs->tabText(2), QStringLiteral("PID 参数"));
     EXPECT_EQ(tabs->tabText(3), QStringLiteral("数据曲线"));
     EXPECT_EQ(tabs->tabText(4), QStringLiteral("故障报警"));
-    EXPECT_EQ(tabs->tabText(5), QStringLiteral("通信调试"));
+    EXPECT_EQ(tabs->tabText(5), QStringLiteral("系统设置"));
+    EXPECT_EQ(tabs->tabText(6), QStringLiteral("通信调试"));
 
     EXPECT_FALSE(window_->showTab(-1));
-    EXPECT_FALSE(window_->showTab(6));
+    EXPECT_FALSE(window_->showTab(7));
     EXPECT_TRUE(window_->showTab(1));
 
     // PID 有两个写入口就会打架：Kp/Ki/Kd 在整个窗口里必须各只有一份，
@@ -219,7 +220,7 @@ TEST_F(UiSmokeTest, InjectingAnUplinkDropRaisesAnAlarmThatShowsUpOnTheOverview) 
     ASSERT_TRUE(connectFromUiAndWaitReady());
 
     // 注入只在通信调试页上。设成"每 1 字节丢 1"就是上行全丢。
-    ASSERT_TRUE(window_->showTab(5));
+    ASSERT_TRUE(window_->showTab(6));
     QSpinBox* spin = find<QSpinBox>("uplinkDropSpin");
     QPushButton* apply = find<QPushButton>("applyInjectionButton");
     ASSERT_NE(spin, nullptr);
@@ -338,6 +339,49 @@ TEST_F(UiSmokeTest, ALatchedFaultSurvivesReconnectAndIsClearedOnlyByExplicitConf
     }
     EXPECT_TRUE(sawFault);
     EXPECT_TRUE(sawCleared);
+}
+
+// 系统设置页：换数据源这件事必须真的换掉、真的重连，而不是只改一个显示值。
+TEST_F(UiSmokeTest, TheSettingsPageSwitchesTheDataSourceAndSaysWhichOneIsLive) {
+    ASSERT_TRUE(window_->showTab(5));
+
+    QComboBox* source = find<QComboBox>("sourceCombo");
+    QPushButton* apply = find<QPushButton>("applySourceButton");
+    ASSERT_NE(source, nullptr);
+    ASSERT_NE(apply, nullptr);
+    EXPECT_EQ(source->count(), 2);   // 进程内模拟器 / 串口
+    // 未连接时可选：换源必须先断开，这是刻意的（同一时刻只能有一个数据源）。
+    ASSERT_TRUE(apply->isEnabled());
+
+    source->setCurrentIndex(0);   // 进程内模拟器
+    apply->click();
+
+    EXPECT_TRUE(manager_->isConnected());
+    EXPECT_TRUE(manager_->device()->isSimulated());
+    EXPECT_TRUE(textOf("currentSourceValue").contains(QStringLiteral("进程内模拟器")));
+    EXPECT_TRUE(textOf("settingsBanner").contains(QStringLiteral("模拟数据")));
+    // 已连接时不许换源，而且要说清理由 —— 禁用一个按钮而不解释等于让人干瞪眼。
+    EXPECT_FALSE(apply->isEnabled());
+    EXPECT_FALSE(apply->toolTip().isEmpty());
+
+    // 断开后又能换了，换回串口时把错误的端口名填进去应当**明确失败**，
+    // 而不是"看起来连上了"。这里用一个必然不存在的端口名。
+    find<QPushButton>("settingsDisconnectButton")->click();
+    EXPECT_FALSE(manager_->isConnected());
+    ASSERT_TRUE(apply->isEnabled());
+
+    source->setCurrentIndex(1);
+    QComboBox* ports = find<QComboBox>("portCombo");
+    ASSERT_NE(ports, nullptr);
+    ports->addItem(QStringLiteral("__no_such_port__"), QStringLiteral("__no_such_port__"));
+    ports->setCurrentIndex(ports->count() - 1);
+    apply->click();
+
+    EXPECT_FALSE(manager_->isConnected()) << "打不开的端口绝不能显示成已连接";
+    EXPECT_NE(manager_->device()->openError(), mchost::OpenError::None);
+    EXPECT_TRUE(textOf("settingsHint").contains(QStringLiteral("打开失败")))
+        << "实际是：" << textOf("settingsHint").toStdString();
+    EXPECT_TRUE(textOf("settingsBanner").contains(QStringLiteral("串口")));
 }
 
 }  // namespace

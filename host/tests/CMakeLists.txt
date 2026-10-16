@@ -9,6 +9,7 @@ add_executable(mc_host_core_tests
     core_test_main.cpp
     test_curve_model.cpp
     test_device_manager.cpp
+    test_serial_device.cpp
 )
 target_link_libraries(mc_host_core_tests PRIVATE mc_host_lib GTest::gtest)
 target_compile_options(mc_host_core_tests PRIVATE -Wall -Wextra)

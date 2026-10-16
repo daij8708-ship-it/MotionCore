@@ -30,7 +30,15 @@ void DeviceManager::connectDevice() {
     if (connected_ || device_ == nullptr) {
         return;
     }
-    device_->open();
+    if (!device_->open()) {
+        // 打开失败在真硬件上是常态（端口被占用、线没插、权限不够）。
+        // 这里**不启动定时器、也不进入"已连接"**：一个打不开的端口被显示成
+        // "已连接"，会让所有后续判断都建立在假前提上。
+        raiseAlarm(QStringLiteral("打开设备失败：%1")
+                       .arg(QString::fromUtf8(openErrorName(device_->openError()))));
+        emit connectionChanged(false);
+        return;
+    }
     clock_.start();
     timingClock_.start();
     lastTimingTickMs_ = -1;
@@ -40,6 +48,29 @@ void DeviceManager::connectDevice() {
     connected_ = true;
     timer_.start();
     emit connectionChanged(true);
+}
+
+bool DeviceManager::useSimulatedDevice() {
+    if (connected_) {
+        return false;
+    }
+    setDevice(std::make_unique<SimulatedDevice>());
+    emit connectionChanged(false);
+    return true;
+}
+
+bool DeviceManager::useSerialDevice(const SerialTransport::Config& config, QString& error) {
+    if (connected_) {
+        error = QStringLiteral("已连接中：请先断开再换数据源");
+        return false;
+    }
+    if (config.portName.isEmpty()) {
+        error = QStringLiteral("没有选择端口");
+        return false;
+    }
+    setDevice(std::make_unique<SerialDevice>(config, mc::LinkMonitor::Config{}));
+    emit connectionChanged(false);
+    return true;
 }
 
 void DeviceManager::disconnectDevice() {

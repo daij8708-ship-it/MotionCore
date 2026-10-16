@@ -1,12 +1,14 @@
 # Qt6 上位机（层 1–5）。刻意与 common/ 分开：
 #   mc_core 永远不链接 Qt；反过来 host 依赖 mc_core（单向）。
-find_package(Qt6 COMPONENTS Widgets QUIET)
+# SerialPort 是**必需**组件（系统设置页要选真实串口、SerialTransport 包 QSerialPort）；
+# 缺它就整块跳过 host，而不是让串口那一页变成摆设（"宁可少一个页面，不可有一个假按钮"）。
+find_package(Qt6 COMPONENTS Widgets SerialPort QUIET)
 
 if(NOT Qt6_FOUND)
     # 找不到 Qt 就**跳过** host，而不是让整个工程配置失败 ——
     # 协议核心库必须能在没装 Qt 的机器上单独构建与测试（ADR-001）。
-    message(WARNING "未找到 Qt6 Widgets，跳过 host/（只构建 libmc_core 与演示程序）。"
-                    "如需上位机：apt install qt6-base-dev libgl-dev")
+    message(WARNING "未找到 Qt6 Widgets / SerialPort，跳过 host/（只构建 libmc_core 与演示程序）。"
+                    "如需上位机：apt install qt6-base-dev libqt6serialport6-dev libgl-dev")
     return()
 endif()
 
@@ -16,6 +18,7 @@ set(MC_HOST_SOURCES
     src/curve_model.cpp
     src/device.cpp
     src/device_manager.cpp
+    src/serial_transport.cpp
     src/ui/alarm_page.cpp
     src/ui/curve_page.cpp
     src/ui/curve_plot.cpp
@@ -24,12 +27,14 @@ set(MC_HOST_SOURCES
     src/ui/motion_page.cpp
     src/ui/overview_page.cpp
     src/ui/param_page.cpp
+    src/ui/settings_page.cpp
 )
 
 set(MC_HOST_HEADERS
     include/mc_host/curve_model.hpp
     include/mc_host/device.hpp
     include/mc_host/device_manager.hpp
+    include/mc_host/serial_transport.hpp
     include/mc_host/telemetry_ring.hpp
     include/mc_host/ui/alarm_page.hpp
     include/mc_host/ui/curve_page.hpp
@@ -39,6 +44,7 @@ set(MC_HOST_HEADERS
     include/mc_host/ui/motion_page.hpp
     include/mc_host/ui/overview_page.hpp
     include/mc_host/ui/param_page.hpp
+    include/mc_host/ui/settings_page.hpp
 )
 
 # 做成库（而不是把源码直接塞进可执行文件），是为了让测试能链接同一份实现，
@@ -47,7 +53,7 @@ add_library(mc_host_lib STATIC ${MC_HOST_SOURCES} ${MC_HOST_HEADERS})
 target_include_directories(mc_host_lib PUBLIC
     $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
 )
-target_link_libraries(mc_host_lib PUBLIC mc_core Qt6::Widgets)
+target_link_libraries(mc_host_lib PUBLIC mc_core Qt6::Widgets Qt6::SerialPort)
 target_compile_options(mc_host_lib PRIVATE -Wall -Wextra -Werror)
 
 add_executable(mc_host src/main.cpp)

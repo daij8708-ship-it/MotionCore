@@ -14,6 +14,7 @@ class DeviceManager;
 class MotionPage;
 class OverviewPage;
 class ParamPage;
+class SettingsPage;
 
 // 层 1：主窗口。只负责组装页面 + 状态栏，不含任何协议细节。
 class MainWindow : public QMainWindow {
@@ -39,6 +40,7 @@ private:
     ParamPage* paramPage_ = nullptr;
     CurvePage* curvePage_ = nullptr;
     AlarmPage* alarmPage_ = nullptr;
+    SettingsPage* settingsPage_ = nullptr;
     DebugPage* debugPage_ = nullptr;
     QLabel* statusLabel_ = nullptr;
     QLabel* dataSourceLabel_ = nullptr;

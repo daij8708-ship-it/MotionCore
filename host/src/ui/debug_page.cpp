@@ -146,16 +146,28 @@ void DebugPage::setRow(const char* key, const QString& text) {
 }
 
 void DebugPage::onConnectionChanged(bool connected) {
-    const bool canInject = connected && manager_.device() != nullptr;
+    const IDevice* device = manager_.device();
+    const bool canInject = connected && device != nullptr && device->supportsFaultInjection();
     uplinkDropSpin_->setEnabled(canInject);
     downlinkDropSpin_->setEnabled(canInject);
     uplinkLatencySpin_->setEnabled(canInject);
     applyInjectionButton_->setEnabled(canInject);
     clearInjectionButton_->setEnabled(canInject);
-    injectionHint_->setText(
-        canInject ? QStringLiteral("注入只在链路打开时有效。断开重连后注入不会自动恢复 —— "
-                                  "要用就重新点“应用注入”。")
-                  : QStringLiteral("未连接：没有链路可以注入。"));
+
+    // 真串口上丢不了字节也加不了延迟。与其给一个**静默无效**的开关
+    // （界面显示"已注入"、线上什么都没变 —— 排查的人会据此得出反向结论），
+    // 不如把整组控件禁掉并说清原因。
+    if (canInject) {
+        injectionHint_->setText(
+            QStringLiteral("注入只在链路打开时有效。断开重连后注入不会自动恢复 —— "
+                           "要用就重新点“应用注入”。"));
+    } else if (connected) {
+        injectionHint_->setText(
+            QStringLiteral("当前是串口设备：丢字节/加延迟这类注入只对进程内模拟器有效。"
+                           "要验断链，请物理断开串口线。"));
+    } else {
+        injectionHint_->setText(QStringLiteral("未连接：没有链路可以注入。"));
+    }
     refresh();
 }
 

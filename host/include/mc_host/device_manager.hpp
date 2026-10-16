@@ -47,6 +47,11 @@ public:
     // 注入只允许在未连接时做 —— 否则旧设备的链路没人关。
     void setDevice(std::unique_ptr<IDevice> device);
 
+    // 换数据源（系统设置页用）。**只在未连接时**允许：已连接时换设备会把
+    // 一条正在跑的链路的关闭责任丢掉。返回 false = 没换（原因写进 error）。
+    bool useSimulatedDevice();
+    bool useSerialDevice(const SerialTransport::Config& config, QString& error);
+
     IDevice* device() noexcept { return device_.get(); }
     const IDevice* device() const noexcept { return device_.get(); }
 

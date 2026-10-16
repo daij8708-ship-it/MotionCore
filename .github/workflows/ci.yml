@@ -112,10 +112,12 @@ jobs:
 
       - name: 安装依赖
         # libgl-dev 是 Qt6Widgets 的前置（缺它 find_package(OpenGL) 失败，Widgets 一起配不上）；
-        # fonts-noto-cjk 是"中文界面能不能读"的前置（缺它截图里中文全是方框）。
+        # fonts-noto-cjk 是"中文界面能不能读"的前置（缺它截图里中文全是方框）；
+        # libqt6serialport6-dev 是 Qt6SerialPort 的前置 —— 系统设置页与串口设备要用，
+        # 缺它 host/ 会整块被跳过（那时 ctest 是全绿，但它压根没测上位机）。
         run: |
           sudo apt-get update
-          sudo apt-get install -y cmake g++ libgtest-dev qt6-base-dev libgl-dev fonts-noto-cjk
+          sudo apt-get install -y cmake g++ libgtest-dev qt6-base-dev libqt6serialport6-dev libgl-dev fonts-noto-cjk
 
       - name: 配置
         run: cmake -S . -B build -DCMAKE_BUILD_TYPE=Debug

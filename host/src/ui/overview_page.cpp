@@ -179,9 +179,16 @@ void OverviewPage::refreshDeviceSection() {
     } else if (device->runMode() == mc::SimRunMode::Position) {
         modeName = "位置环";
     }
+    // 速度/位置/目标来自遥测帧（回读），而模式**协议里没有回读字段** ——
+    // 串口设备上它只能是"上位机最后一次被确认的设定值"。这个差别必须写在
+    // 同一行里，否则"模式 速度环"会被读成"设备现在确实在速度环"。
+    const QString modeText =
+        device->runModeIsReadBack()
+            ? QStringLiteral("模式 %1").arg(QString::fromUtf8(modeName))
+            : QStringLiteral("模式 %1（上位机设定值，非回读）").arg(QString::fromUtf8(modeName));
     motionValue_->setText(
-        QStringLiteral("模式 %1 | 输出 %2 | 速度 %3 deg/s | 位置 %4 deg | 目标 %5")
-            .arg(QString::fromUtf8(modeName))
+        QStringLiteral("%1 | 输出 %2 | 速度 %3 deg/s | 位置 %4 deg | 目标 %5")
+            .arg(modeText)
             .arg(device->enabled() ? QStringLiteral("使能中") : QStringLiteral("未使能"))
             .arg(static_cast<double>(device->velocityDegPerSec()), 0, 'f', 1)
             .arg(static_cast<double>(device->positionDeg()), 0, 'f', 1)

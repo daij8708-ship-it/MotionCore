@@ -188,7 +188,8 @@ void saveTabShots(mchost::MainWindow& window, const QString& prefix) {
         const char* file;
     };
     const Shot shots[] = {{"总览", "overview"}, {"运动", "motion"}, {"参数", "param"},
-                          {"曲线", "curve"},    {"报警", "alarm"},  {"调试", "debug"}};
+                          {"曲线", "curve"},    {"报警", "alarm"},  {"设置", "settings"},
+                          {"调试", "debug"}};
     for (const Shot& shot : shots) {
         const int index = tabIndexByTitle(window, QString::fromUtf8(shot.needle));
         if (index < 0 || !window.showTab(index)) {
