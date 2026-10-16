@@ -10,6 +10,7 @@
 #include "mc_host/ui/alarm_page.hpp"
 #include "mc_host/ui/curve_page.hpp"
 #include "mc_host/ui/debug_page.hpp"
+#include "mc_host/ui/history_page.hpp"
 #include "mc_host/ui/motion_page.hpp"
 #include "mc_host/ui/overview_page.hpp"
 #include "mc_host/ui/param_page.hpp"
@@ -28,18 +29,20 @@ MainWindow::MainWindow(DeviceManager& manager, QWidget* parent)
     paramPage_ = new ParamPage(manager_, tabs_);
     curvePage_ = new CurvePage(manager_, tabs_);
     alarmPage_ = new AlarmPage(manager_, tabs_);
+    historyPage_ = new HistoryPage(manager_, tabs_);
     settingsPage_ = new SettingsPage(manager_, tabs_);
     debugPage_ = new DebugPage(manager_, tabs_);
 
-    // 页序按"从看状态到动手调"排：总览 → 运动 → 参数 → 曲线 → 报警 → 设置 → 调试。
+    // 页序按"从看状态到动手调"排：总览 → 运动 → 参数 → 曲线 → 报警 → 历史 → 设置 → 调试。
     // 参数页紧挨着运动页：它们改的是同一台设备的两种东西（运动 vs 控制器系数）。
     // 报警页紧跟着曲线页：曲线看出异常之后，下一步就是去查报警记录与当前故障。
-    // 设置页在调试页前：先决定"跟谁说话"，再去看"说得怎么样"。
+    // 历史页在报警页之后、设置页之前：先看"现在怎么了、刚才是怎么了"，再决定"跟谁说话"。
     tabs_->addTab(overviewPage_, QStringLiteral("设备总览"));
     tabs_->addTab(motionPage_, QStringLiteral("运动控制"));
     tabs_->addTab(paramPage_, QStringLiteral("PID 参数"));
     tabs_->addTab(curvePage_, QStringLiteral("数据曲线"));
     tabs_->addTab(alarmPage_, QStringLiteral("故障报警"));
+    tabs_->addTab(historyPage_, QStringLiteral("历史数据"));
     tabs_->addTab(settingsPage_, QStringLiteral("系统设置"));
     tabs_->addTab(debugPage_, QStringLiteral("通信调试"));
     setCentralWidget(tabs_);

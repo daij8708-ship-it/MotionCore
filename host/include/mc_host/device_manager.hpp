@@ -11,6 +11,7 @@
 #include <QVector>
 
 #include "mc_host/device.hpp"
+#include "mc_host/history_store.hpp"
 #include "mc_host/telemetry_ring.hpp"
 
 namespace mchost {
@@ -56,6 +57,14 @@ public:
     const IDevice* device() const noexcept { return device_.get(); }
 
     const TelemetryRing& telemetry() const noexcept { return telemetry_; }
+
+    // --- 历史落库（阶段 7）------------------------------------------------------
+    // 默认落在用户数据目录（见 historyPath()）。落库失败**不影响采集**：
+    // 实时界面不该因为磁盘写不进去就停摆；但历史页必须把"没在落库"显示出来。
+    bool openHistory(const QString& dbPath);
+    bool historyOpen() const noexcept { return history_ != nullptr && history_->isOpen(); }
+    HistoryStore* history() noexcept { return history_.get(); }
+    static QString defaultHistoryPath();
 
     bool isConnected() const noexcept { return connected_; }
     std::uint64_t ticks() const noexcept { return ticks_; }
@@ -141,6 +150,7 @@ private:
 
     std::unique_ptr<IDevice> device_;
     TelemetryRing telemetry_;
+    std::unique_ptr<HistoryStore> history_;
     QTimer timer_;
     QElapsedTimer clock_;
     // 单独一个计时器：clock_ 给的是"连接以来的毫秒数"（仿真时钟），

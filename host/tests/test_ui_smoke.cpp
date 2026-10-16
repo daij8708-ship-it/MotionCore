@@ -11,6 +11,7 @@
 #include <QTableWidget>
 #include <QTableWidgetItem>
 #include <QTabWidget>
+#include <QTemporaryDir>
 
 #include "mc/device_simulator.hpp"
 #include "mc/link_monitor.hpp"
@@ -126,17 +127,18 @@ TEST_F(UiSmokeTest, TheSimulatedDataSourceIsLabelledInTheBannerAndTheStatusBar) 
 TEST_F(UiSmokeTest, TheWindowOffersTheDesignedPagesAndRejectsAnOutOfRangeTab) {
     QTabWidget* tabs = window_->tabs();
     ASSERT_NE(tabs, nullptr);
-    EXPECT_EQ(tabs->count(), 7);
+    EXPECT_EQ(tabs->count(), 8);
     EXPECT_EQ(tabs->tabText(0), QStringLiteral("设备总览"));
     EXPECT_EQ(tabs->tabText(1), QStringLiteral("运动控制"));
     EXPECT_EQ(tabs->tabText(2), QStringLiteral("PID 参数"));
     EXPECT_EQ(tabs->tabText(3), QStringLiteral("数据曲线"));
     EXPECT_EQ(tabs->tabText(4), QStringLiteral("故障报警"));
-    EXPECT_EQ(tabs->tabText(5), QStringLiteral("系统设置"));
-    EXPECT_EQ(tabs->tabText(6), QStringLiteral("通信调试"));
+    EXPECT_EQ(tabs->tabText(5), QStringLiteral("历史数据"));
+    EXPECT_EQ(tabs->tabText(6), QStringLiteral("系统设置"));
+    EXPECT_EQ(tabs->tabText(7), QStringLiteral("通信调试"));
 
     EXPECT_FALSE(window_->showTab(-1));
-    EXPECT_FALSE(window_->showTab(7));
+    EXPECT_FALSE(window_->showTab(8));
     EXPECT_TRUE(window_->showTab(1));
 
     // PID 有两个写入口就会打架：Kp/Ki/Kd 在整个窗口里必须各只有一份，
@@ -220,7 +222,7 @@ TEST_F(UiSmokeTest, InjectingAnUplinkDropRaisesAnAlarmThatShowsUpOnTheOverview) 
     ASSERT_TRUE(connectFromUiAndWaitReady());
 
     // 注入只在通信调试页上。设成"每 1 字节丢 1"就是上行全丢。
-    ASSERT_TRUE(window_->showTab(6));
+    ASSERT_TRUE(window_->showTab(7));
     QSpinBox* spin = find<QSpinBox>("uplinkDropSpin");
     QPushButton* apply = find<QPushButton>("applyInjectionButton");
     ASSERT_NE(spin, nullptr);
@@ -343,7 +345,7 @@ TEST_F(UiSmokeTest, ALatchedFaultSurvivesReconnectAndIsClearedOnlyByExplicitConf
 
 // 系统设置页：换数据源这件事必须真的换掉、真的重连，而不是只改一个显示值。
 TEST_F(UiSmokeTest, TheSettingsPageSwitchesTheDataSourceAndSaysWhichOneIsLive) {
-    ASSERT_TRUE(window_->showTab(5));
+    ASSERT_TRUE(window_->showTab(6));
 
     QComboBox* source = find<QComboBox>("sourceCombo");
     QPushButton* apply = find<QPushButton>("applySourceButton");
@@ -382,6 +384,50 @@ TEST_F(UiSmokeTest, TheSettingsPageSwitchesTheDataSourceAndSaysWhichOneIsLive) {
     EXPECT_TRUE(textOf("settingsHint").contains(QStringLiteral("打开失败")))
         << "实际是：" << textOf("settingsHint").toStdString();
     EXPECT_TRUE(textOf("settingsBanner").contains(QStringLiteral("串口")));
+}
+
+// 历史页：接上、跑一段、断开，然后从库里把刚才那一段查回来。
+//
+// 判据是"表里真的有行"，而不是"数据库文件存在" —— 文件存在说明不了写进去过什么。
+TEST_F(UiSmokeTest, TheHistoryPageReadsBackWhatWasRecordedWhileConnected) {
+    // 用一个临时库：测试不该往开发者的真实历史库里写字（也不该依赖它是否可写）。
+    QTemporaryDir dir;
+    ASSERT_TRUE(dir.isValid());
+    const QString dbPath = dir.filePath(QStringLiteral("ui-history.db"));
+    ASSERT_TRUE(manager_->openHistory(dbPath)) << manager_->history()->error().toStdString();
+
+    ASSERT_TRUE(connectFromUiAndWaitReady());
+    ASSERT_TRUE(selectVelocityModeAndStart());
+    ASSERT_TRUE(mchost_test::waitUntil([this]() { return manager_->telemetry().size() > 50U; }));
+
+    ASSERT_TRUE(window_->showTab(5));
+    find<QPushButton>("refreshSessionsButton")->click();
+
+    QTableWidget* samples = find<QTableWidget>("historySampleTable");
+    QTableWidget* commands = find<QTableWidget>("historyCommandTable");
+    ASSERT_NE(samples, nullptr);
+    ASSERT_NE(commands, nullptr);
+    EXPECT_NE(find<QTableWidget>("historyEventTable"), nullptr);
+
+    // 数据点是**攒批**写的（默认 256 条 / 500 ms 一批），所以查到之前必然先落了一次盘。
+    ASSERT_TRUE(mchost_test::waitUntil([samples]() { return samples->rowCount() > 0; }));
+    EXPECT_TRUE(textOf("historyPathValue").contains(QStringLiteral("ui-history.db")));
+    EXPECT_TRUE(textOf("historyRangeLabel").contains(QStringLiteral("条样本")))
+        << "实际是：" << textOf("historyRangeLabel").toStdString();
+    EXPECT_TRUE(manager_->history()->samplesWritten() > 0ULL);
+    // 批量落盘在界面上也是可查的：样本数远大于事务数。
+    EXPECT_LT(manager_->history()->transactions(), manager_->history()->samplesWritten());
+
+    // 命令记录也落了库：界面上的按钮确实被记下来了，而且带着结局。
+    ASSERT_TRUE(mchost_test::waitUntil([commands]() { return commands->rowCount() > 0; }));
+    bool sawAcked = false;
+    for (int row = 0; row < commands->rowCount(); ++row) {
+        const QTableWidgetItem* result = commands->item(row, 3);
+        if (result != nullptr && result->text() == QStringLiteral("已确认")) {
+            sawAcked = true;
+        }
+    }
+    EXPECT_TRUE(sawAcked);
 }
 
 }  // namespace

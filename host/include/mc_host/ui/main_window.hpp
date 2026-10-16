@@ -11,6 +11,7 @@ class AlarmPage;
 class CurvePage;
 class DebugPage;
 class DeviceManager;
+class HistoryPage;
 class MotionPage;
 class OverviewPage;
 class ParamPage;
@@ -40,6 +41,7 @@ private:
     ParamPage* paramPage_ = nullptr;
     CurvePage* curvePage_ = nullptr;
     AlarmPage* alarmPage_ = nullptr;
+    HistoryPage* historyPage_ = nullptr;
     SettingsPage* settingsPage_ = nullptr;
     DebugPage* debugPage_ = nullptr;
     QLabel* statusLabel_ = nullptr;

@@ -2,12 +2,32 @@
 
 #include <utility>
 
+#include <QDateTime>
+#include <QDir>
+#include <QStandardPaths>
+
 #include "mc/device_state.hpp"
 
 namespace mchost {
 
+QString DeviceManager::defaultHistoryPath() {
+    // 用户数据目录而不是当前目录：双击启动时"当前目录"是哪儿只有天知道，
+    // 历史文件散落在下载目录/桌面/安装目录里是查不出来的。
+    QString dir = QStandardPaths::writableLocation(QStandardPaths::AppDataLocation);
+    if (dir.isEmpty()) {
+        dir = QDir::homePath() + QStringLiteral("/.mc_host");
+    }
+    QDir().mkpath(dir);
+    return dir + QStringLiteral("/history.db");
+}
+
 DeviceManager::DeviceManager(QObject* parent) : QObject(parent) {
     device_ = std::make_unique<SimulatedDevice>();
+
+    // 默认就把历史库打开。打不开只是"没有历史"，不是"不能用"：
+    // 这种情况下 historyOpen() 为假、historyError() 有原因，历史页会照实显示。
+    history_ = std::make_unique<HistoryStore>();
+    (void)history_->open(defaultHistoryPath());
 
     timer_.setInterval(kTickIntervalMs);
     // 精确定时器：默认的粗粒度定时器在 Windows/WSL 上有 ±十几毫秒的抖动，
@@ -24,6 +44,13 @@ void DeviceManager::setDevice(std::unique_ptr<IDevice> device) {
         disconnectDevice();
     }
     device_ = std::move(device);
+}
+
+bool DeviceManager::openHistory(const QString& dbPath) {
+    if (history_ == nullptr) {
+        history_ = std::make_unique<HistoryStore>();
+    }
+    return history_->open(dbPath);
 }
 
 void DeviceManager::connectDevice() {
@@ -46,6 +73,12 @@ void DeviceManager::connectDevice() {
     ticks_ = 0U;
     lastFaultLatched_ = false;
     connected_ = true;
+
+    if (history_ != nullptr && history_->isOpen()) {
+        (void)history_->beginSession(QString::fromUtf8(device_->kindName()), device_->isSimulated(),
+                                     QDateTime::currentMSecsSinceEpoch());
+    }
+
     timer_.start();
     emit connectionChanged(true);
 }
@@ -82,6 +115,13 @@ void DeviceManager::disconnectDevice() {
         device_->close();
     }
     connected_ = false;
+
+    // 收摊前把这一段的尾巴落盘并结束会话。少了这一步，最后不到半个刷写周期的
+    // 样本会永远留在内存里，而历史页上那一段会显示成"数据到此为止"。
+    if (history_ != nullptr && history_->isOpen()) {
+        history_->endSession(QDateTime::currentMSecsSinceEpoch());
+    }
+
     emit connectionChanged(false);
     emit commandLogChanged();
 }
@@ -216,6 +256,12 @@ void DeviceManager::raiseAlarm(const QString& text) {
     while (alarms_.size() > kMaxAlarms) {
         alarms_.removeFirst();
     }
+    // 报警也要进历史：实时列表只有最近 200 条，而"上周三那次断链是什么时候"
+    // 只能从库里查。addEvent 会先把待写的样本落盘，保证它与样本的先后顺序正确。
+    if (history_ != nullptr) {
+        history_->addEvent(static_cast<std::uint64_t>(elapsedMs_),
+                           QDateTime::currentMSecsSinceEpoch(), text);
+    }
     emit alarmRaised(text);
 }
 
@@ -269,6 +315,15 @@ void DeviceManager::tickOnce() {
         sample.faultCode = tick.telemetry.faultCode;
         sample.pwmOutput = tick.telemetry.pwmOutput;
         telemetry_.push(sample);
+        // 落库走**同一条**数据（不是另取一份遥测）：历史里的曲线与当时屏幕上
+        // 看到的曲线必须是同一组数字，否则事后追查会追到一个界面从没显示过的值。
+        if (history_ != nullptr) {
+            history_->addSample(sample);
+        }
+    }
+
+    if (history_ != nullptr) {
+        history_->tick(QDateTime::currentMSecsSinceEpoch());
     }
 
     // --- 报警：只报"安全事件"，不把每一件小事都变成报警 --------------------
@@ -292,6 +347,17 @@ void DeviceManager::tickOnce() {
     lastFaultLatched_ = latched;
 
     if (tick.commandLogChanged) {
+        // 命令记录会**变**（等待应答 → 已确认/被拒/超时），所以按 (会话, seq) 覆盖写。
+        // 整本日志都过一遍（上限 64 条）：只处理"新增的那几条"要额外维护一套
+        // "见到过哪些 seq"的状态，而那套状态一旦与日志的淘汰策略不一致就会漏记。
+        if (history_ != nullptr) {
+            for (const CommandRecord& record : device_->commandLog()) {
+                history_->upsertCommand(record.sentAtMs, record.seq,
+                                        QString::fromStdString(record.name),
+                                        static_cast<int>(record.status),
+                                        static_cast<int>(record.nackReason));
+            }
+        }
         emit commandLogChanged();
     }
 
