@@ -59,6 +59,11 @@ void DeviceManager::clearTelemetry() {
     telemetry_.clear();
 }
 
+void DeviceManager::clearAlarms() {
+    alarms_.clear();
+    emit alarmsCleared();
+}
+
 bool DeviceManager::sendSetMode(int mode) {
     if (!connected_ || device_ == nullptr) {
         return false;
@@ -110,21 +115,36 @@ bool DeviceManager::sendSetPid(double kp, double ki, double kd) {
     return sent;
 }
 
-void DeviceManager::injectUplinkDrop(bool enabled) {
+bool DeviceManager::sendClearFault(mc::FaultCode code) {
+    if (!connected_ || device_ == nullptr) {
+        return false;
+    }
+    const bool sent = device_->clearFault(code);
+    emit commandLogChanged();
+    return sent;
+}
+
+void DeviceManager::setUplinkDropEveryNthByte(int n) {
     if (device_ != nullptr) {
-        device_->setUplinkDropEveryNthByte(enabled ? 1U : 0U);
+        device_->setUplinkDropEveryNthByte(static_cast<std::uint32_t>(n < 0 ? 0 : n));
     }
 }
 
-void DeviceManager::injectDownlinkDrop(bool enabled) {
+void DeviceManager::setDownlinkDropEveryNthByte(int n) {
     if (device_ != nullptr) {
-        device_->setDownlinkDropEveryNthByte(enabled ? 1U : 0U);
+        device_->setDownlinkDropEveryNthByte(static_cast<std::uint32_t>(n < 0 ? 0 : n));
     }
 }
 
-void DeviceManager::injectUplinkLatency(int polls) {
+void DeviceManager::setUplinkLatencyPolls(int n) {
     if (device_ != nullptr) {
-        device_->setUplinkLatencyPolls(static_cast<std::uint32_t>(polls < 0 ? 0 : polls));
+        device_->setUplinkLatencyPolls(static_cast<std::uint32_t>(n < 0 ? 0 : n));
+    }
+}
+
+void DeviceManager::clearInjectedFaults() {
+    if (device_ != nullptr) {
+        device_->clearInjectedFaults();
     }
 }
 
@@ -232,6 +252,11 @@ void DeviceManager::tickOnce() {
     if (latched && !lastFaultLatched_) {
         raiseAlarm(QStringLiteral("设备故障：%1（已锁存，须人工确认才能清除）")
                        .arg(QString::fromLatin1(mc::faultCodeName(device_->faultCode()))));
+    } else if (!latched && lastFaultLatched_) {
+        // 降沿也要报：故障"什么时候没的"和"什么时候来的"一样是排查依据，
+        // 而且这是**人工动作**的结果 —— 不说的话，日志里只剩一条"设备故障"，
+        // 后来的人会以为故障还挂着。
+        raiseAlarm(QStringLiteral("故障锁存已清除（人工确认 + 恢复校验通过）"));
     }
     lastFaultLatched_ = latched;
 

@@ -255,6 +255,19 @@ bool SimulatedDevice::setPid(const mc::SetPid& pid) {
     return recordCommand("SET_PID", seq, link_->host->sendSetPid(pid, seq, lastTickMs_));
 }
 
+bool SimulatedDevice::clearFault(mc::FaultCode code) {
+    // 会话未就绪就不发。局部条件比设备门禁更严一档是**故意**的：故障锁存期间
+    // 链路一旦断了（重连会被直接带回 Fault），此时发出去的确认连门禁都到不了，
+    // 日志里只会多一条噪声。
+    if (link_ == nullptr || !link_->host->sessionReady()) {
+        return recordCommand("CLEAR_FAULT", 0U, false);
+    }
+    const std::uint16_t seq = link_->seq++;
+    return recordCommand(
+        "CLEAR_FAULT", seq,
+        link_->host->sendClearFault(static_cast<std::uint8_t>(code), seq, lastTickMs_));
+}
+
 // --- 只读观测 ---------------------------------------------------------------
 
 bool SimulatedDevice::sessionReady() const noexcept {

@@ -17,6 +17,7 @@ constexpr float kInf = std::numeric_limits<float>::infinity();
 // 这里把关系写死，任何人把 sizeof 当成线长用都会立刻撞上。
 static_assert(sizeof(mc::Telemetry) >= mc::kTelemetrySize);
 static_assert(sizeof(mc::SetPid) >= mc::kSetPidSize);
+static_assert(sizeof(mc::ClearFault) >= mc::kClearFaultSize);
 static_assert(sizeof(mc::Nack) > mc::kNackSize,
               "Nack 的内存布局带 padding（u16 + u8 会被补齐到 4 字节），"
               "而线长是 3 —— 这正是不能对结构体做 memcpy 的实例");
@@ -274,4 +275,31 @@ TEST(Payload, SetModeRejectsUnknownModeNumber) {
 TEST(Payload, NackRejectsUnknownReasonValue) {
     EXPECT_TRUE(mc::isNackValid(mc::Nack{1U, mc::NackReason::Busy}));
     EXPECT_FALSE(mc::isNackValid(mc::Nack{1U, static_cast<mc::NackReason>(200U)}));
+}
+
+TEST(Payload, ClearFaultCarriesTheAcknowledgedCodeByteForByte) {
+    EXPECT_EQ(mc::encodeClearFault(mc::ClearFault{}).size(), mc::kClearFaultSize);
+
+    const std::vector<std::uint8_t> bytes = mc::encodeClearFault(mc::ClearFault{4U});
+    mc::ClearFault decoded;
+    ASSERT_EQ(mc::decodeClearFault(bytes.data(), bytes.size(), decoded), PayloadError::None);
+    EXPECT_EQ(decoded.faultCode, 4U);
+
+    // 长度不符 = 线格式错（结构性），与"码值不对"（语义性）分开报。
+    EXPECT_EQ(mc::decodeClearFault(bytes.data(), 0U, decoded), PayloadError::LengthMismatch);
+    EXPECT_EQ(mc::decodeClearFault(bytes.data(), mc::kClearFaultSize + 1U, decoded),
+              PayloadError::LengthMismatch);
+    EXPECT_EQ(mc::decodeClearFault(nullptr, mc::kClearFaultSize, decoded),
+              PayloadError::LengthMismatch);
+}
+
+TEST(Payload, ClearFaultRejectsTheNoFaultCode) {
+    // 0 = "无故障"。确认一个不存在的故障是无意义的空操作，放行它
+    // 只会让界面显示一句"已确认清除"而实际什么都没发生。
+    EXPECT_FALSE(mc::isClearFaultValid(mc::ClearFault{0U}));
+    EXPECT_TRUE(mc::isClearFaultValid(mc::ClearFault{1U}));
+
+    // 上界不在这里卡：本层不认识设备的故障码枚举，码值对不对由设备比对
+    // 当前锁存的那个码来决定 —— 不存在的码在那边永远对不上。
+    EXPECT_TRUE(mc::isClearFaultValid(mc::ClearFault{200U}));
 }

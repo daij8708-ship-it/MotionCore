@@ -87,48 +87,23 @@ OverviewPage::OverviewPage(DeviceManager& manager, QWidget* parent)
     disconnectButton_->setObjectName(QStringLiteral("disconnectButton"));
     buttons->addWidget(connectButton_, 0, 0);
     buttons->addWidget(disconnectButton_, 0, 1);
-
-    // 故障注入：用来在**没有硬件**的情况下演示断链重连、心跳失效与故障保护。
-    // 打的正是测试里那套注入，不是另做一套 —— 所以演示出来的行为与用例断言的是同一件事。
-    auto* injectGroup = new QGroupBox(QStringLiteral("故障注入（演示用，打在回环链路上）"), this);
-    auto* injectRow = new QGridLayout(injectGroup);
-    injectUplinkButton_ = new QPushButton(QStringLiteral("断开上行（设备→上位机全丢）"), this);
-    injectUplinkButton_->setObjectName(QStringLiteral("injectUplinkButton"));
-    injectUplinkButton_->setCheckable(true);
-    injectDownlinkButton_ = new QPushButton(QStringLiteral("断开下行（上位机→设备全丢）"), this);
-    injectDownlinkButton_->setObjectName(QStringLiteral("injectDownlinkButton"));
-    injectDownlinkButton_->setCheckable(true);
-    injectLatencyButton_ = new QPushButton(QStringLiteral("上行延迟 80 拍"), this);
-    injectLatencyButton_->setObjectName(QStringLiteral("injectLatencyButton"));
-    injectLatencyButton_->setCheckable(true);
-    clearFaultsButton_ = new QPushButton(QStringLiteral("清除注入"), this);
-    clearFaultsButton_->setObjectName(QStringLiteral("clearFaultsButton"));
-    injectRow->addWidget(injectUplinkButton_, 0, 0);
-    injectRow->addWidget(injectDownlinkButton_, 0, 1);
-    injectRow->addWidget(injectLatencyButton_, 1, 0);
-    injectRow->addWidget(clearFaultsButton_, 1, 1);
-    root->addWidget(injectGroup);
     root->addLayout(buttons);
+
+    // 故障注入按钮**不在这页**：它统一收在「通信调试」页。
+    // 注入状态只能有一个真源 —— 两处按钮改同一个状态，迟早会出现"界面显示断着、
+    // 实际没断"（或反过来），而这会让人得出完全反向的结论。
+    auto* injectPointer = new QLabel(
+        QStringLiteral("故障注入（断开上行 / 下行、上行延迟）在「通信调试」页 —— "
+                       "那是唯一设置处，本页的统计会跟着它变。"),
+        this);
+    injectPointer->setWordWrap(true);
+    injectPointer->setStyleSheet(QStringLiteral("color:#666;"));
+    root->addWidget(injectPointer);
     root->addStretch(1);
 
     connect(connectButton_, &QPushButton::clicked, &manager_, &DeviceManager::connectDevice);
     connect(disconnectButton_, &QPushButton::clicked, &manager_,
             &DeviceManager::disconnectDevice);
-
-    const auto injectOrClear = [this]() {
-        manager_.injectUplinkDrop(injectUplinkButton_->isChecked());
-        manager_.injectDownlinkDrop(injectDownlinkButton_->isChecked());
-        manager_.injectUplinkLatency(injectLatencyButton_->isChecked() ? 80 : 0);
-    };
-    connect(injectUplinkButton_, &QPushButton::clicked, this, injectOrClear);
-    connect(injectDownlinkButton_, &QPushButton::clicked, this, injectOrClear);
-    connect(injectLatencyButton_, &QPushButton::clicked, this, injectOrClear);
-    connect(clearFaultsButton_, &QPushButton::clicked, this, [this, injectOrClear]() {
-        injectUplinkButton_->setChecked(false);
-        injectDownlinkButton_->setChecked(false);
-        injectLatencyButton_->setChecked(false);
-        injectOrClear();
-    });
 
     connect(&manager_, &DeviceManager::connectionChanged, this,
             &OverviewPage::onConnectionChanged);
@@ -153,10 +128,6 @@ QLabel* OverviewPage::addRow(QGridLayout* grid, int row, const QString& title) {
 void OverviewPage::onConnectionChanged(bool connected) {
     connectButton_->setEnabled(!connected);
     disconnectButton_->setEnabled(connected);
-    injectUplinkButton_->setEnabled(connected);
-    injectDownlinkButton_->setEnabled(connected);
-    injectLatencyButton_->setEnabled(connected);
-    clearFaultsButton_->setEnabled(connected);
     refresh();
 }
 

@@ -98,6 +98,23 @@ std::vector<std::uint8_t> encodeSetMode(const SetMode& value);
 PayloadError decodeSetMode(const std::uint8_t* data, std::size_t len, SetMode& out) noexcept;
 bool isSetModeValid(const SetMode& value) noexcept;
 
+// --- 故障确认（上位机 → 设备）-----------------------------------------------
+//
+// 载荷只有一字节：操作员**确认的那个故障码**。要求它与设备当前锁存的故障一致，
+// 不一致就拒（理由见 protocol.hpp 里 ClearFault 的说明：防止在旧屏幕上
+// 把操作员没看见的新故障清掉）。
+//
+// 注意 `faultCode == 0`（None）不是合法确认：确认"没有故障"没有意义，
+// 那只会是一处静默的空操作。所以 isValid 会拒它。
+struct ClearFault {
+    std::uint8_t faultCode = 0U;
+};
+inline constexpr std::size_t kClearFaultSize = 1U;
+
+std::vector<std::uint8_t> encodeClearFault(const ClearFault& value);
+PayloadError decodeClearFault(const std::uint8_t* data, std::size_t len, ClearFault& out) noexcept;
+bool isClearFaultValid(const ClearFault& value) noexcept;
+
 // --- 拒绝（双向）------------------------------------------------------------
 enum class NackReason : std::uint8_t {
     Unspecified = 0U,

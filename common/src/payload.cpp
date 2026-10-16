@@ -131,6 +131,35 @@ bool isSetModeValid(const SetMode& value) noexcept {
     return value.mode <= kMaxRunMode;
 }
 
+// --- 故障确认 ---------------------------------------------------------------
+
+std::vector<std::uint8_t> encodeClearFault(const ClearFault& value) {
+    return std::vector<std::uint8_t>(1U, value.faultCode);
+}
+
+PayloadError decodeClearFault(const std::uint8_t* data, std::size_t len, ClearFault& out) noexcept {
+    if (data == nullptr || len != kClearFaultSize) {
+        return PayloadError::LengthMismatch;
+    }
+
+    ClearFault parsed;
+    parsed.faultCode = data[0];
+
+    out = parsed;
+    return PayloadError::None;
+}
+
+bool isClearFaultValid(const ClearFault& value) noexcept {
+    // 0 = 遥测字段里的"无故障"（见 Telemetry::faultCode）。
+    // 确认一个不存在的故障是无意义的空操作 —— 若放行，界面会显示"已确认清除"，
+    // 而实际上什么都没发生。
+    //
+    // 上界不在这里卡：本层不认识设备的故障码枚举，且**码值对不对由设备比对**
+    // （它要确认的正是"当前锁存的那个"），一个不存在的码在那边永远对不上，
+    // 会以 BadParameter 被拒。在这里再抄一份枚举只会多一处会过期的副本。
+    return value.faultCode != 0U;
+}
+
 // --- 拒绝 -------------------------------------------------------------------
 
 std::vector<std::uint8_t> encodeNack(const Nack& value) {

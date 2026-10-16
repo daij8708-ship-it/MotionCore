@@ -116,6 +116,8 @@ public:
     bool sendStart(std::uint16_t seq, std::uint64_t nowMs);
     bool sendSetTarget(float target, std::uint16_t seq, std::uint64_t nowMs);
     bool sendSetPid(const SetPid& pid, std::uint16_t seq, std::uint64_t nowMs);
+    // faultCode 是操作员**确认的**那个码，不是"清一切"（见 ClearFault 的说明）。
+    bool sendClearFault(std::uint8_t faultCode, std::uint16_t seq, std::uint64_t nowMs);
 
     // STOP 是单向的（ADR-004）：不等应答，因此不需要 nowMs。
     bool sendStop(std::uint16_t seq);

@@ -610,6 +610,90 @@ TEST(EndToEnd, WithoutTheCommLossWindowTheDeviceKeepsRunningOnAStaleTarget) {
         << "上位机早就不说话了，电机还在追那个陈旧目标 —— 这就是 F7 缺陷本身";
 }
 
+// 故障确认（CLEAR_FAULT）：**只有** Fault 态可发、**只有**报的那个码才能清。
+//
+// 两条都刻意做负向对照：拒绝必须连"锁存位没动"一起断言 ——
+// 只断言收到 NAK 是不够的，那只证明"回了句不行"，不证明"什么都没发生"。
+TEST(EndToEnd, ClearFaultOnlyWorksInFaultAndOnlyForTheCodeTheDeviceIsReporting) {
+    mc::SimulatorConfig config;
+    config.commLossTimeoutMs = 150U;   // 不用等 3 秒就能走进 Fault
+    Rig rig(config);
+
+    ASSERT_TRUE(rig.host.sendSetMode(1U, rig.nextSeq(), rig.now));
+    ASSERT_TRUE(rig.host.sendStart(rig.nextSeq(), rig.now));
+    ASSERT_TRUE(rig.host.sendSetTarget(200.0F, rig.nextSeq(), rig.now));
+    // 测试台没有心跳（只开了握手），所以设备收到的最后一帧就在第一拍 ——
+    // 静默计时从那里开始，跑多久要按这个算，不能按"我发了命令之后跑了几拍"算。
+    rig.run(10U);   // 静默 90 ms < 150 ms 窗口
+    ASSERT_EQ(rig.sim.state(), mc::DeviceState::Running);
+
+    rig.run(20U);   // 静默累计 ~290 ms > 150 ms 窗口
+    ASSERT_EQ(rig.sim.state(), mc::DeviceState::Fault);
+    ASSERT_TRUE(rig.sim.faultLatched());
+    ASSERT_EQ(rig.sim.faultCode(), mc::FaultCode::CommunicationLoss);
+
+    // ① 确认的是另一个码（屏幕上停在旧故障上就会这样）：拒绝，锁存位不动。
+    ASSERT_TRUE(rig.host.sendClearFault(static_cast<std::uint8_t>(mc::FaultCode::OverSpeed),
+                                        rig.nextSeq(), rig.now));
+    rig.exchange();
+    ASSERT_EQ(rig.sim.nacksSent().size(), std::size_t{1});
+    EXPECT_EQ(rig.sim.nacksSent().back().reason, mc::NackReason::BadParameter);
+    EXPECT_TRUE(rig.sim.faultLatched()) << "被拒 = 没有副作用";
+    EXPECT_EQ(rig.sim.state(), mc::DeviceState::Fault);
+
+    // ② 码对上了：确认 → 恢复校验通过 → 回 Ready，锁存清除。
+    ASSERT_TRUE(rig.host.sendClearFault(
+        static_cast<std::uint8_t>(mc::FaultCode::CommunicationLoss), rig.nextSeq(), rig.now));
+    rig.exchange();
+    EXPECT_FALSE(rig.sim.faultLatched());
+    EXPECT_EQ(rig.sim.state(), mc::DeviceState::Ready);
+    EXPECT_EQ(rig.sim.faultCode(), mc::FaultCode::None);
+    EXPECT_EQ(rig.sim.nacksSent().size(), std::size_t{1}) << "这一趟只该有 ACK";
+
+    // ③ 已经在 Ready 了：门禁拒掉。绝不能静默回一句"已清除" ——
+    // 那会把"没有故障可清"说成"清成功了一次"。
+    ASSERT_TRUE(rig.host.sendClearFault(
+        static_cast<std::uint8_t>(mc::FaultCode::CommunicationLoss), rig.nextSeq(), rig.now));
+    rig.exchange();
+    ASSERT_EQ(rig.sim.nacksSent().size(), std::size_t{2});
+    EXPECT_EQ(rig.sim.nacksSent().back().reason, mc::NackReason::IllegalState);
+    EXPECT_EQ(rig.host.tracker().stats().rejectedByPeer, 2ULL);
+}
+
+// 重连**不能**把故障顺手洗掉：设备带着未确认的故障重新握手，必须直接回到 Fault。
+// 这是最危险的那条路径（设备出事 → 人跑过去拔线 → 重新上电 → 界面显示一切正常），
+// 所以单独钉一条 —— 它与链路层、握手层、状态机三处都有关系，缺一处就漏。
+TEST(EndToEnd, ReconnectingWithAnUnacknowledgedFaultComesBackToFaultNotReady) {
+    mc::SimulatorConfig config;
+    config.commLossTimeoutMs = 150U;
+    Rig rig(config);
+
+    ASSERT_TRUE(rig.host.sendSetMode(1U, rig.nextSeq(), rig.now));
+    ASSERT_TRUE(rig.host.sendStart(rig.nextSeq(), rig.now));
+    rig.run(10U);
+    ASSERT_EQ(rig.sim.state(), mc::DeviceState::Running);
+
+    rig.run(20U);
+    ASSERT_EQ(rig.sim.state(), mc::DeviceState::Fault);
+    ASSERT_TRUE(rig.sim.faultLatched());
+
+    // "拔线重连"：端口关掉又打开，然后重新走一轮握手。
+    // 这里显式发 HELLO 而不是等测试台自己重连 —— 测试台只开了握手、
+    // 没开链路监控（没有心跳），它看不出链路断过，也就不会自己重开一轮。
+    rig.sim.applyEvent(mc::DeviceEvent::LinkLost);
+    ASSERT_EQ(rig.sim.state(), mc::DeviceState::Disconnected);
+    rig.sim.applyEvent(mc::DeviceEvent::LinkOpened);
+    ASSERT_EQ(rig.sim.state(), mc::DeviceState::Initializing);
+
+    ASSERT_TRUE(rig.host.sendHello(rig.nextSeq(), rig.now));
+    rig.exchange();
+
+    EXPECT_EQ(rig.sim.state(), mc::DeviceState::Fault)
+        << "带着未确认的故障重连上来必须直接回 Fault，不许借握手把故障洗掉";
+    EXPECT_TRUE(rig.sim.faultLatched());
+    EXPECT_EQ(rig.sim.faultCode(), mc::FaultCode::CommunicationLoss);
+}
+
 // HELLO 是会话起点，必须清空去重窗口。
 // 否则上位机重启后从 seq=0 重新编号，新命令会被当成旧会话的重传静默吞掉 ——
 // 表现为"握手成功但一条命令都不生效"。

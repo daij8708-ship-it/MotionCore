@@ -21,6 +21,7 @@
 #include <QElapsedTimer>
 #include <QString>
 #include <QStringList>
+#include <QTabWidget>
 #include <QTimer>
 
 #include "mc/device_state.hpp"
@@ -154,27 +155,53 @@ void printReport(mchost::DeviceManager& manager, mchost::MainWindow& window,
 // 绘制事件只投递给**当前可见页**，而且由事件循环异步投递 —— 自检里不能假设
 // "曲线页已经画过了"（那几秒它并不是当前页）。要拿到"曲线控件真的画过"的证据，
 // 只能切到那一页并显式渲染一次。这是自检的取样手段，不是产品运行时的路径。
+//
+// 页序会随界面一起长（现在 6 页，随后还有历史 / 设置）。这里**按页标题找下标**，
+// 不写死数字：写死的话每加一页都要改一次，而且改错不会报错、只会静默地截错页面。
+int tabIndexByTitle(const mchost::MainWindow& window, const QString& needle) {
+    QTabWidget* tabs = window.tabs();
+    if (tabs == nullptr) {
+        return -1;
+    }
+    for (int i = 0; i < tabs->count(); ++i) {
+        if (tabs->tabText(i).contains(needle)) {
+            return i;
+        }
+    }
+    return -1;
+}
+
 void forceOneRender(mchost::MainWindow& window) {
-    (void)window.showTab(2);
+    const int curve = tabIndexByTitle(window, QStringLiteral("曲线"));
+    if (curve < 0) {
+        std::printf("切页失败：找不到标题含“曲线”的页\n");
+        return;
+    }
+    (void)window.showTab(curve);
     QApplication::processEvents();
     (void)window.grab();
 }
 
 void saveTabShots(mchost::MainWindow& window, const QString& prefix) {
-    const QStringList names{QStringLiteral("overview"), QStringLiteral("motion"),
-                            QStringLiteral("curve")};
-    for (int i = 0; i < names.size(); ++i) {
-        if (!window.showTab(i)) {
-            std::printf("切页失败：index=%d\n", i);
+    struct Shot {
+        const char* needle;
+        const char* file;
+    };
+    const Shot shots[] = {{"总览", "overview"}, {"运动", "motion"}, {"参数", "param"},
+                          {"曲线", "curve"},    {"报警", "alarm"},  {"调试", "debug"}};
+    for (const Shot& shot : shots) {
+        const int index = tabIndexByTitle(window, QString::fromUtf8(shot.needle));
+        if (index < 0 || !window.showTab(index)) {
+            std::printf("切页失败：%s\n", shot.file);
             continue;
         }
         // 让布局与绘制跑完再抓图，否则抓到的是上一页的残留。
         QApplication::processEvents();
         QApplication::processEvents();
-        const QString path = QStringLiteral("%1-%2.png").arg(prefix, names.at(i));
+        const QString path = QStringLiteral("%1-%2.png").arg(prefix, QString::fromUtf8(shot.file));
         const bool ok = window.grab().save(path);
-        std::printf("截图 %-9s : %s（%s）\n", names.at(i).toUtf8().constData(),
-                    ok ? "已保存" : "保存失败", path.toUtf8().constData());
+        std::printf("截图 %-9s : %s（%s）\n", shot.file, ok ? "已保存" : "保存失败",
+                    path.toUtf8().constData());
     }
     (void)window.showTab(0);
 }

@@ -270,6 +270,34 @@ DeviceSimulator::Reply DeviceSimulator::executeFrame(const Frame& frame, TickRes
             return replyWithAck(MessageType::SetPidAck, frame.seq, result);
         }
 
+        case MessageType::ClearFault: {
+            // 门禁已保证此刻处于 Fault。这里还要看**载荷里的故障码**是不是
+            // 当前锁存的那个：不是就说明操作员确认的是另一个故障（多半屏幕停在
+            // 旧状态上），拒绝比"顺手把当前这个也清掉"安全。
+            ClearFault payload;
+            if (decodeClearFault(frame.payload.data(), frame.payload.size(), payload) !=
+                    PayloadError::None ||
+                !isClearFaultValid(payload)) {
+                ++result.malformedPayloads;
+                return replyWithNack(frame.seq, NackReason::BadParameter, result);
+            }
+            if (payload.faultCode != static_cast<std::uint8_t>(faultCode_)) {
+                return replyWithNack(frame.seq, NackReason::BadParameter, result);
+            }
+
+            // 真机上这是两步：人工确认（RecoveryConfirmed）→ 设备自检通过
+            // （RecoveryOk）。模拟器**没有可自检的硬件**，所以两步在这里连续走完 ——
+            // "确认即恢复"是模拟器的局限，不是协议少了一步；接真设备时
+            // Recovery 态会真的停留若干拍，而界面本来就按遥测显示状态，无须改动。
+            const bool confirmed = applyEvent(DeviceEvent::RecoveryConfirmed).accepted;
+            const bool cleared = confirmed && applyEvent(DeviceEvent::RecoveryOk).accepted;
+            if (!cleared) {
+                // 走不到这里（门禁已保证 Fault），但绝不能"没清掉还回 ACK"。
+                return replyWithNack(frame.seq, NackReason::IllegalState, result);
+            }
+            return replyWithAck(MessageType::ClearFaultAck, frame.seq, result);
+        }
+
         default:
             // 未知类型、以及设备不该收到的 ACK 帧，一律回 NAK 并说明原因。
             ++result.unknownTypes;

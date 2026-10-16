@@ -29,7 +29,7 @@ enum class DeviceState : std::uint8_t {
     Ready        = 2U,   // 握手完成、参数一致，输出未使能
     Running      = 3U,   // 已使能，按 target 运动
     Stopping     = 4U,   // 收到 STOP，正把速度收到零
-    Fault        = 5U,   // 有故障：只允许 STOP / HEARTBEAT / HELLO
+    Fault        = 5U,   // 有故障：只允许 STOP / HEARTBEAT / HELLO / CLEAR_FAULT
     Recovery     = 6U,   // 人工确认后的中间态，恢复校验通过才回 Ready
 };
 

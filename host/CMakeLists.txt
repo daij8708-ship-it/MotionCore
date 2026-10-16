@@ -16,11 +16,14 @@ set(MC_HOST_SOURCES
     src/curve_model.cpp
     src/device.cpp
     src/device_manager.cpp
+    src/ui/alarm_page.cpp
     src/ui/curve_page.cpp
     src/ui/curve_plot.cpp
+    src/ui/debug_page.cpp
     src/ui/main_window.cpp
     src/ui/motion_page.cpp
     src/ui/overview_page.cpp
+    src/ui/param_page.cpp
 )
 
 set(MC_HOST_HEADERS
@@ -28,11 +31,14 @@ set(MC_HOST_HEADERS
     include/mc_host/device.hpp
     include/mc_host/device_manager.hpp
     include/mc_host/telemetry_ring.hpp
+    include/mc_host/ui/alarm_page.hpp
     include/mc_host/ui/curve_page.hpp
     include/mc_host/ui/curve_plot.hpp
+    include/mc_host/ui/debug_page.hpp
     include/mc_host/ui/main_window.hpp
     include/mc_host/ui/motion_page.hpp
     include/mc_host/ui/overview_page.hpp
+    include/mc_host/ui/param_page.hpp
 )
 
 # 做成库（而不是把源码直接塞进可执行文件），是为了让测试能链接同一份实现，

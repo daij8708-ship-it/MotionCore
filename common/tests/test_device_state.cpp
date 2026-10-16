@@ -351,21 +351,21 @@ TEST(DeviceState, FaultIsNotRaisedWhileDisconnected) {
 // 命令门禁表：逐格断言，不是"抽查几条"
 // ---------------------------------------------------------------------------
 TEST(DeviceState, CommandGateTableMatchesSpec) {
-    const std::array<MessageType, 7> types = {
-        MessageType::Hello,  MessageType::Heartbeat, MessageType::Stop, MessageType::SetMode,
-        MessageType::SetPid, MessageType::Start,     MessageType::SetTarget,
+    const std::array<MessageType, 8> types = {
+        MessageType::Hello, MessageType::Heartbeat,   MessageType::Stop,     MessageType::SetMode,
+        MessageType::SetPid, MessageType::Start,      MessageType::SetTarget, MessageType::ClearFault,
     };
 
     // 行 = kAllStates 的顺序，列 = 上面 types 的顺序。true = 放行。
-    const bool expected[7][7] = {
-        //  Hello  HB     STOP  SET_MODE SET_PID START  SET_TARGET
-        {true, true, true, false, false, false, false},  // Disconnected
-        {true, true, true, false, false, false, false},  // Initializing
-        {true, true, true, true, true, true, true},      // Ready
-        {true, true, true, false, true, false, true},    // Running
-        {true, true, true, false, true, false, false},   // Stopping
-        {true, true, true, false, false, false, false},  // Fault
-        {true, true, true, false, false, false, false},  // Recovery
+    const bool expected[7][8] = {
+        //  Hello  HB     STOP  SET_MODE SET_PID START  SET_TARGET CLEAR_FAULT
+        {true, true, true, false, false, false, false, false},  // Disconnected
+        {true, true, true, false, false, false, false, false},  // Initializing
+        {true, true, true, true, true, true, true, false},      // Ready
+        {true, true, true, false, true, false, true, false},    // Running
+        {true, true, true, false, true, false, false, false},   // Stopping
+        {true, true, true, false, false, false, false, true},   // Fault
+        {true, true, true, false, false, false, false, false},  // Recovery
     };
 
     for (std::size_t row = 0U; row < kAllStates.size(); ++row) {
@@ -396,6 +396,11 @@ TEST(DeviceState, ControlCommandsAreGatedOnReadyOrRunningOnly) {
         // STOP / HEARTBEAT 处处放行 —— 堵掉它们等于自毁安全通道与断线检测。
         EXPECT_EQ(mc::commandVerdict(state, MessageType::Stop) == CommandVerdict::Allow, true);
         EXPECT_EQ(mc::commandVerdict(state, MessageType::Heartbeat) == CommandVerdict::Allow, true);
+
+        // 故障确认只在 Fault 放行：Recovery 里说明人工确认已经做过了，
+        // 其余状态要么没有故障可确认，要么链路根本发不出去。
+        EXPECT_EQ(mc::commandVerdict(state, MessageType::ClearFault) == CommandVerdict::Allow,
+                  state == DeviceState::Fault);
     }
 }
 

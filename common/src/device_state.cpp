@@ -77,6 +77,17 @@ CommandVerdict commandVerdict(DeviceState state, MessageType type) noexcept {
             return (state == DeviceState::Ready) ? CommandVerdict::Allow
                                                  : CommandVerdict::RejectIllegalState;
 
+        // 故障确认：**只在 Fault 状态放行**。
+        //
+        // 放行的条件不是"故障锁存着"，而是"此刻正停在故障态" —— 这两者不等价：
+        // 拔线重连后锁存位仍在，但状态是 Disconnected/Initializing，那时该做的是
+        // 把链路接回来（重握手会直接回到 Fault），而不是在一条发不出命令的链路上
+        // 点确认。Recovery 里也不放行：那说明人工确认已经做过了，正等自检结果，
+        // 此时再确认一次没有意义。
+        case MessageType::ClearFault:
+            return (state == DeviceState::Fault) ? CommandVerdict::Allow
+                                                 : CommandVerdict::RejectIllegalState;
+
         default:
             // ACK 类帧、以及将来新增的类型：不该由门禁判"状态非法"。
             // 它们由设备按 UnknownType 拒 —— 否则会把"线接反了/端点是旧的"

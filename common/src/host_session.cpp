@@ -112,6 +112,12 @@ bool HostSession::sendSetPid(const SetPid& pid, std::uint16_t seq, std::uint64_t
     return sendCommand(MessageType::SetPid, seq, encodeSetPid(pid), nowMs);
 }
 
+bool HostSession::sendClearFault(std::uint8_t faultCode, std::uint16_t seq, std::uint64_t nowMs) {
+    ClearFault payload;
+    payload.faultCode = faultCode;
+    return sendCommand(MessageType::ClearFault, seq, encodeClearFault(payload), nowMs);
+}
+
 bool HostSession::sendStop(std::uint16_t seq) {
     // 单向：不登记、不等待、失败也不重试（ADR-004）。
     return sendFrame(MessageType::Stop, seq, {});

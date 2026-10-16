@@ -93,6 +93,11 @@ enum class MessageType : std::uint8_t {
     Stop = 0x12U,      // 单向：无 ACK、不重传（docs/PROTOCOL.md §5）
     SetTarget = 0x13U,
     SetPid = 0x14U,
+    // 人工确认故障、请求清除锁存。载荷里带**被确认的故障码**：
+    // "确认"只有针对一个具体观察到的故障才有意义，否则它等于"把现在挂着的
+    // 任何东西清掉"—— 屏幕停在旧故障上、设备又新出了另一个故障时，
+    // 这一下就会把操作员**没看见**的那个故障悄悄清掉。
+    ClearFault = 0x15U,
 
     Telemetry = 0x20U,   // 周期上报：无 ACK，允许丢帧
     FaultEvent = 0x21U,
@@ -104,6 +109,7 @@ enum class MessageType : std::uint8_t {
     StartAck = 0x91U,
     SetTargetAck = 0x93U,
     SetPidAck = 0x94U,
+    ClearFaultAck = 0x95U,
 };
 
 // 已知类型返回其名称；未知类型返回 "UNKNOWN"。
@@ -115,8 +121,11 @@ bool isKnown(MessageType type) noexcept;
 // 应答帧（bit7 置位且是已知的 Ack 类型）。
 bool isAck(MessageType type) noexcept;
 
-// 是否需要应答：HELLO / HEARTBEAT / SET_MODE / START / SET_TARGET / SET_PID 为 true；
-// STOP（ADR-004）、TELEMETRY（ADR-005）、FAULT_EVENT（周期通知，R6）与各类 ACK 为 false。
+// 是否需要应答：HELLO / HEARTBEAT / SET_MODE / START / SET_TARGET / SET_PID / CLEAR_FAULT
+// 为 true；STOP（ADR-004）、TELEMETRY（ADR-005）、FAULT_EVENT（周期通知，R6）与各类 ACK 为 false。
+//
+// CLEAR_FAULT 必须应答：它是**唯一**能清掉故障锁存的报文，"清没清掉"这件事
+// 不能靠猜。没确认就显示"已清除"，等于把一次未生效的安全动作说成生效了。
 bool requiresAck(MessageType type) noexcept;
 
 // 是否允许在超时后自动重传：只有幂等命令才为 true。

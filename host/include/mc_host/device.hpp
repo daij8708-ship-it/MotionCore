@@ -107,6 +107,9 @@ public:
     virtual bool stop() = 0;
     virtual bool setTarget(float target) = 0;
     virtual bool setPid(const mc::SetPid& pid) = 0;
+    // 人工确认并请求清除故障锁存。**只发"确认"，不代表故障已被排除** ——
+    // 物理原因（超速/堵转/接线）必须先由人查清，这条命令只是让设备重新自检。
+    virtual bool clearFault(mc::FaultCode code) = 0;
 
     // --- 会话与设备状态 ---------------------------------------------------------
     virtual bool sessionReady() const noexcept = 0;
@@ -171,6 +174,7 @@ public:
     bool stop() override;
     bool setTarget(float target) override;
     bool setPid(const mc::SetPid& pid) override;
+    bool clearFault(mc::FaultCode code) override;
 
     bool sessionReady() const noexcept override;
     std::uint64_t handshakeRounds() const noexcept override;

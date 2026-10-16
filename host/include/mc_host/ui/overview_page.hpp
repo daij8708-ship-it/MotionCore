@@ -55,10 +55,6 @@ private:
 
     QPushButton* connectButton_ = nullptr;
     QPushButton* disconnectButton_ = nullptr;
-    QPushButton* injectUplinkButton_ = nullptr;
-    QPushButton* injectDownlinkButton_ = nullptr;
-    QPushButton* injectLatencyButton_ = nullptr;
-    QPushButton* clearFaultsButton_ = nullptr;
 };
 
 }  // namespace mchost

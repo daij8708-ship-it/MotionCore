@@ -4,6 +4,7 @@
 #include <cstdint>
 #include <iterator>
 #include <random>
+#include <string>
 #include <utility>
 #include <vector>
 
@@ -443,10 +444,28 @@ TEST(ProtocolPolicy, TryAckOfMapsRequestsAndReportsNoPairing) {
     EXPECT_TRUE(mc::tryAckOf(MessageType::SetPid, ack));
     EXPECT_EQ(ack, MessageType::SetPidAck);
 
+    EXPECT_TRUE(mc::tryAckOf(MessageType::ClearFault, ack));
+    EXPECT_EQ(ack, MessageType::ClearFaultAck);
+
     // 负向对照：Stop / Telemetry 没有配对的 ACK，必须显式返回 false，
     // 而不是靠一个"哨兵类型"蒙混过去。
     EXPECT_FALSE(mc::tryAckOf(MessageType::Stop, ack));
     EXPECT_FALSE(mc::tryAckOf(MessageType::Telemetry, ack));
+}
+
+// 故障确认：**必须应答**（"清没清掉"不能靠猜），而且它属于幂等那一族
+// （不含任何运动，重复清除一个已清除的故障是无操作）。
+TEST(ProtocolPolicy, ClearFaultNeedsAckAndIsIdempotent) {
+    EXPECT_TRUE(mc::isKnown(MessageType::ClearFault));
+    EXPECT_TRUE(mc::isKnown(MessageType::ClearFaultAck));
+    EXPECT_EQ(std::string(mc::toString(MessageType::ClearFault)), "CLEAR_FAULT");
+    EXPECT_EQ(std::string(mc::toString(MessageType::ClearFaultAck)), "CLEAR_FAULT_ACK");
+
+    EXPECT_TRUE(mc::requiresAck(MessageType::ClearFault));
+    EXPECT_TRUE(mc::isRetryable(MessageType::ClearFault));
+    EXPECT_FALSE(mc::isPeriodicProbe(MessageType::ClearFault));
+    EXPECT_TRUE(mc::isAck(MessageType::ClearFaultAck));
+    EXPECT_FALSE(mc::isAck(MessageType::ClearFault));
 }
 
 TEST(ProtocolPolicy, AckFlagDistinguishesAcksFromRequests) {

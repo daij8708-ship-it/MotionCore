@@ -85,30 +85,6 @@ MotionPage::MotionPage(DeviceManager& manager, QWidget* parent)
     targetRow->addStretch(1);
     root->addWidget(targetGroup);
 
-    // --- PID ------------------------------------------------------------------
-    auto* pidGroup = new QGroupBox(
-        QStringLiteral("PID 参数（SET_PID）—— 在线整定，改的是控制器系数，不动目标值"), this);
-    auto* pidRow = new QHBoxLayout(pidGroup);
-    const auto makeGain = [this, pidRow](QDoubleSpinBox*& spin, const QString& name, double value,
-                                         const QString& objectName) {
-        pidRow->addWidget(new QLabel(name, this));
-        spin = new QDoubleSpinBox(this);
-        spin->setObjectName(objectName);
-        spin->setRange(0.0, 1000.0);
-        spin->setDecimals(3);
-        spin->setSingleStep(0.05);
-        spin->setValue(value);
-        pidRow->addWidget(spin);
-    };
-    makeGain(kpSpin_, QStringLiteral("Kp"), 1.6, QStringLiteral("kpSpin"));
-    makeGain(kiSpin_, QStringLiteral("Ki"), 0.4, QStringLiteral("kiSpin"));
-    makeGain(kdSpin_, QStringLiteral("Kd"), 0.02, QStringLiteral("kdSpin"));
-    applyPidButton_ = new QPushButton(QStringLiteral("下发 PID"), this);
-    applyPidButton_->setObjectName(QStringLiteral("applyPidButton"));
-    pidRow->addWidget(applyPidButton_);
-    pidRow->addStretch(1);
-    root->addWidget(pidGroup);
-
     // --- 上一次命令的结果 ------------------------------------------------------
     lastResultLabel_ = new QLabel(QStringLiteral("尚未下发任何命令"), this);
     lastResultLabel_->setObjectName(QStringLiteral("lastResultLabel"));
@@ -131,7 +107,6 @@ MotionPage::MotionPage(DeviceManager& manager, QWidget* parent)
 
     connect(applyModeButton_, &QPushButton::clicked, this, &MotionPage::applyMode);
     connect(applyTargetButton_, &QPushButton::clicked, this, &MotionPage::applyTarget);
-    connect(applyPidButton_, &QPushButton::clicked, this, &MotionPage::applyPid);
     connect(startButton_, &QPushButton::clicked, this,
             [this]() { manager_.sendStart(); lastResultLabel_->setText(QStringLiteral("已下发 START，等结果…")); });
     connect(stopButton_, &QPushButton::clicked, this,
@@ -175,14 +150,6 @@ void MotionPage::applyTarget() {
             .arg(targetUnitLabel_->text()));
 }
 
-void MotionPage::applyPid() {
-    manager_.sendSetPid(kpSpin_->value(), kiSpin_->value(), kdSpin_->value());
-    lastResultLabel_->setText(QStringLiteral("已下发 SET_PID(%1, %2, %3)，等结果…")
-                                  .arg(kpSpin_->value(), 0, 'f', 3)
-                                  .arg(kiSpin_->value(), 0, 'f', 3)
-                                  .arg(kdSpin_->value(), 0, 'f', 3));
-}
-
 void MotionPage::onConnectionChanged(bool connected) {
     const IDevice* device = manager_.device();
     const bool ready = connected && device != nullptr && device->sessionReady();
@@ -191,12 +158,8 @@ void MotionPage::onConnectionChanged(bool connected) {
     applyModeButton_->setEnabled(ready);
     startButton_->setEnabled(ready);
     applyTargetButton_->setEnabled(ready);
-    applyPidButton_->setEnabled(ready);
     modeCombo_->setEnabled(ready);
     targetSpin_->setEnabled(ready);
-    kpSpin_->setEnabled(ready);
-    kiSpin_->setEnabled(ready);
-    kdSpin_->setEnabled(ready);
 
     // STOP 只在"连接着"上做限制：会话没就绪也要能停。
     // 把手停在一个"未就绪"的会话后面，恰恰是最危险的时刻。

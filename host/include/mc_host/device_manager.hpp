@@ -80,6 +80,9 @@ public:
     static constexpr int kTickIntervalMs = 10;
     // 界面刷新分频：每 5 拍刷一次 = 20 Hz。
     static constexpr int kUiRefreshDivider = 5;
+    // 报警记录上限。是**有界**的：长时间运行的界面不能靠"反正没人看"来无限增长。
+    // 公开它，是为了让报警页能如实写出"最多保留多少条"，而不是自己抄一个数字。
+    static constexpr int kMaxAlarms = 200;
 
 public slots:
     void connectDevice();
@@ -89,18 +92,29 @@ public slots:
     // 否则点一下"清屏"就把丢帧统计抹了，等于自己把证据删掉）。
     void clearTelemetry();
 
+    // 清空**报警列表**。注意它只清这份记录，**不碰设备上的故障锁存** ——
+    // 两件事差着一个数量级：一个是把屏幕擦干净，一个是让设备重新允许启动。
+    // 合成一个按钮就是安全设计上的错误。
+    void clearAlarms();
+
     // 命令。返回 false 表示**没有发出去**（未连接 / 会话未就绪）。
     bool sendSetMode(int mode);
     bool sendStart();
     bool sendStop();
     bool sendSetTarget(double target);
     bool sendSetPid(double kp, double ki, double kd);
+    bool sendClearFault(mc::FaultCode code);
 
     // 故障注入：用来在**没有硬件**的情况下演示断链、重连、心跳与故障保护。
     // 打的正是测试里那套注入，不是另做一套。
-    void injectUplinkDrop(bool enabled);
-    void injectDownlinkDrop(bool enabled);
-    void injectUplinkLatency(int polls);
+    //
+    // 参数化接口（0 = 关闭），而且这里是**唯一**的设置处：注入状态只有一个真源。
+    // 两处按钮改同一个状态，迟早会出现"界面显示断着、实际没断"—— 而这类误判
+    // 恰好会让人得出"断链重连失效"这种反向结论。诊断页拿到的必须是真相。
+    void setUplinkDropEveryNthByte(int n);
+    void setDownlinkDropEveryNthByte(int n);
+    void setUplinkLatencyPolls(int n);
+    void clearInjectedFaults();
 
 signals:
     void connectionChanged(bool connected);
@@ -108,6 +122,8 @@ signals:
     void statsRefreshed();
     void commandLogChanged();
     void alarmRaised(const QString& text);
+    // 报警列表被清空（与 alarmRaised 对称：界面据此重建表格，而不是自己猜）。
+    void alarmsCleared();
 
 private slots:
     void onTick();
@@ -139,7 +155,6 @@ private:
 
     bool lastFaultLatched_ = false;
     QVector<AlarmRecord> alarms_;
-    static constexpr int kMaxAlarms = 200;
 };
 
 }  // namespace mchost

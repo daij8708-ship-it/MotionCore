@@ -149,7 +149,8 @@ TEST_F(DeviceManagerTest, DownlinkFailureSettlesAMotionCommandAsTimedOut) {
     ASSERT_TRUE(connectAndWaitReady());
 
     // 上位机 → 设备全丢：命令发得出去、回不来，正是"未确认的运动指令"这个场景。
-    manager_->injectDownlinkDrop(true);
+    // 每 1 字节丢 1 = 全丢。
+    manager_->setDownlinkDropEveryNthByte(1);
     ASSERT_TRUE(manager_->sendSetTarget(120.0));
 
     EXPECT_TRUE(mchost_test::waitUntil(
@@ -169,13 +170,13 @@ TEST_F(DeviceManagerTest, UplinkFailureTearsDownTheSessionAndItReconnectsByItsel
     const std::uint64_t roundsBefore = device()->handshakeRounds();
 
     // 设备 → 上位机全丢：心跳全部不收应答，链路监控判失效，会话被作废。
-    manager_->injectUplinkDrop(true);
+    manager_->setUplinkDropEveryNthByte(1);
     ASSERT_TRUE(mchost_test::waitUntil([this]() { return !device()->sessionReady(); }));
     EXPECT_TRUE(manager_->isConnected());   // 传输还开着：失效的是链路质量，不是端口
     EXPECT_FALSE(manager_->alarms().isEmpty());
 
     // 恢复上行后不需要人工点任何东西：退避到点就重开一轮握手。
-    manager_->injectUplinkDrop(false);
+    manager_->setUplinkDropEveryNthByte(0);
     ASSERT_TRUE(mchost_test::waitUntil([this]() { return device()->sessionReady(); }));
     EXPECT_GT(device()->handshakeRounds(), roundsBefore);
 }

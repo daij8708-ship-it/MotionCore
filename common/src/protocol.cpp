@@ -17,6 +17,7 @@ constexpr TypeInfo kTypeTable[] = {
     {MessageType::Stop, "STOP"},
     {MessageType::SetTarget, "SET_TARGET"},
     {MessageType::SetPid, "SET_PID"},
+    {MessageType::ClearFault, "CLEAR_FAULT"},
     {MessageType::Telemetry, "TELEMETRY"},
     {MessageType::FaultEvent, "FAULT_EVENT"},
     {MessageType::Nack, "NAK"},
@@ -26,6 +27,7 @@ constexpr TypeInfo kTypeTable[] = {
     {MessageType::StartAck, "START_ACK"},
     {MessageType::SetTargetAck, "SET_TARGET_ACK"},
     {MessageType::SetPidAck, "SET_PID_ACK"},
+    {MessageType::ClearFaultAck, "CLEAR_FAULT_ACK"},
 };
 
 const TypeInfo* lookup(MessageType type) noexcept {
@@ -63,6 +65,7 @@ bool requiresAck(MessageType type) noexcept {
         case MessageType::Start:
         case MessageType::SetTarget:
         case MessageType::SetPid:
+        case MessageType::ClearFault:
             return true;
         default:
             // Stop（单向停止，ADR-004）、Telemetry（周期上报，ADR-005）、全部 ACK
@@ -80,7 +83,12 @@ bool isRetryable(MessageType type) noexcept {
         case MessageType::Hello:
         case MessageType::SetMode:
         case MessageType::SetPid:
+        case MessageType::ClearFault:
             // 幂等命令：重发不改变最终状态。
+            //
+            // CLEAR_FAULT 属于这一族：它不产生任何运动，重复清除一个已清除的故障
+            // 也是无操作。而且重发**正好被设备侧的去重窗口接住**（同 seq 重放应答，
+            // 不重复执行副作用），所以"应答丢了再发一次"是安全的。
             return true;
         case MessageType::Start:
         case MessageType::SetTarget:
@@ -118,6 +126,9 @@ bool tryAckOf(MessageType request, MessageType& out) noexcept {
             return true;
         case MessageType::SetPid:
             out = MessageType::SetPidAck;
+            return true;
+        case MessageType::ClearFault:
+            out = MessageType::ClearFaultAck;
             return true;
         default:
             // Stop / Telemetry / FaultEvent 没有"请求-应答"配对。

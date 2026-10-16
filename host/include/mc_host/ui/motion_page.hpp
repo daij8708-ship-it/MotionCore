@@ -34,7 +34,6 @@ public slots:
 private:
     void applyMode();
     void applyTarget();
-    void applyPid();
     void updateTargetRange();
 
     DeviceManager& manager_;
@@ -47,10 +46,6 @@ private:
     QDoubleSpinBox* targetSpin_ = nullptr;
     QLabel* targetUnitLabel_ = nullptr;
     QPushButton* applyTargetButton_ = nullptr;
-    QDoubleSpinBox* kpSpin_ = nullptr;
-    QDoubleSpinBox* kiSpin_ = nullptr;
-    QDoubleSpinBox* kdSpin_ = nullptr;
-    QPushButton* applyPidButton_ = nullptr;
     QLabel* lastResultLabel_ = nullptr;
     QTableWidget* logTable_ = nullptr;
 };
