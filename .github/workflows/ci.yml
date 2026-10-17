@@ -29,7 +29,7 @@ jobs:
         # （含 docs/ 会形成自指 —— 那个文件里就写着这个指纹）。
         run: |
           set -euo pipefail
-          got=$(find CMakeLists.txt common tools host -type f | LC_ALL=C sort \
+          got=$(find CMakeLists.txt common tools host firmware -type f | LC_ALL=C sort \
                 | xargs sha256sum --text | sha256sum --text | cut -d' ' -f1)
           want=$(grep -m1 '结果：' docs/TEST_REPORT.md | grep -oE '[0-9a-f]{64}' || true)
           echo "当前源码聚合值：$got"
@@ -101,6 +101,27 @@ jobs:
 
       - name: 跑端到端演示（无需 Qt 与硬件）
         run: ./build/tools/mc_loopback_demo
+
+  firmware:
+    name: 固件核心（宿主测试 + PTY 端到端）
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: 安装依赖
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y cmake g++ libgtest-dev
+
+      - name: 配置
+        run: cmake -S firmware -B build-fw -DCMAKE_BUILD_TYPE=Debug
+
+      - name: 构建
+        run: cmake --build build-fw -j"$(nproc)"
+
+      - name: 跑测试
+        # 含一条真 PTY 端到端：mc_fw_sim 用与 STM32 相同的固件核心扮演设备。
+        run: ctest --test-dir build-fw --output-on-failure
 
   host:
     name: Qt6 上位机

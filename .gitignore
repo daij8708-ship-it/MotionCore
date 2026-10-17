@@ -2,6 +2,8 @@
 build/
 build-*/
 cmake-build-*/
+firmware/build/
+firmware/build-*/
 CMakeCache.txt
 CMakeFiles/
 compile_commands.json
