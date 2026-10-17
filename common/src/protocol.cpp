@@ -18,6 +18,9 @@ constexpr TypeInfo kTypeTable[] = {
     {MessageType::SetTarget, "SET_TARGET"},
     {MessageType::SetPid, "SET_PID"},
     {MessageType::ClearFault, "CLEAR_FAULT"},
+    {MessageType::ReadParams, "READ_PARAMS"},
+    {MessageType::Home, "HOME"},
+    {MessageType::SetLimits, "SET_LIMITS"},
     {MessageType::Telemetry, "TELEMETRY"},
     {MessageType::FaultEvent, "FAULT_EVENT"},
     {MessageType::Nack, "NAK"},
@@ -28,6 +31,9 @@ constexpr TypeInfo kTypeTable[] = {
     {MessageType::SetTargetAck, "SET_TARGET_ACK"},
     {MessageType::SetPidAck, "SET_PID_ACK"},
     {MessageType::ClearFaultAck, "CLEAR_FAULT_ACK"},
+    {MessageType::ReadParamsAck, "READ_PARAMS_ACK"},
+    {MessageType::HomeAck, "HOME_ACK"},
+    {MessageType::SetLimitsAck, "SET_LIMITS_ACK"},
 };
 
 const TypeInfo* lookup(MessageType type) noexcept {
@@ -66,6 +72,14 @@ bool requiresAck(MessageType type) noexcept {
         case MessageType::SetTarget:
         case MessageType::SetPid:
         case MessageType::ClearFault:
+        case MessageType::ReadParams:
+        // HOME 必须应答：它是**一条运动命令**（电机真的会转）。
+        // 没收到"已接受"就不知道它有没有开始，而"以为在回零、其实没动"
+        // 比明确失败更难查。
+        case MessageType::Home:
+        // SET_LIMITS 必须应答：它是设备侧的一道安全约束，
+        // "改没改成功"不能靠猜。
+        case MessageType::SetLimits:
             return true;
         default:
             // Stop（单向停止，ADR-004）、Telemetry（周期上报，ADR-005）、全部 ACK
@@ -84,6 +98,8 @@ bool isRetryable(MessageType type) noexcept {
         case MessageType::SetMode:
         case MessageType::SetPid:
         case MessageType::ClearFault:
+        case MessageType::ReadParams:
+        case MessageType::SetLimits:
             // 幂等命令：重发不改变最终状态。
             //
             // CLEAR_FAULT 属于这一族：它不产生任何运动，重复清除一个已清除的故障
@@ -92,7 +108,9 @@ bool isRetryable(MessageType type) noexcept {
             return true;
         case MessageType::Start:
         case MessageType::SetTarget:
-            // 运动指令：超时后进入 Fault 等待人工确认，绝不自动重发（ADR-003）。
+        case MessageType::Home:
+            // 运动指令（回零也在内：电机真的会转）：超时后进入 Fault
+            // 等待人工确认，绝不自动重发（ADR-003）。
             return false;
         default:
             // 含 Heartbeat：虽期待应答，但心跳本身是周期性的，
@@ -129,6 +147,15 @@ bool tryAckOf(MessageType request, MessageType& out) noexcept {
             return true;
         case MessageType::ClearFault:
             out = MessageType::ClearFaultAck;
+            return true;
+        case MessageType::ReadParams:
+            out = MessageType::ReadParamsAck;
+            return true;
+        case MessageType::Home:
+            out = MessageType::HomeAck;
+            return true;
+        case MessageType::SetLimits:
+            out = MessageType::SetLimitsAck;
             return true;
         default:
             // Stop / Telemetry / FaultEvent 没有"请求-应答"配对。

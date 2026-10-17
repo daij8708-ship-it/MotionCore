@@ -136,6 +136,9 @@ TEST(FrameCodec, EncodeRejectsOversizePayload) {
 
 TEST(FrameCodec, EncodeRejectsUnsupportedVersion) {
     Frame frame = makeFrame(MessageType::Telemetry, 1U, {});
+    // 这里刻意填 **v2** 而不是"随便一个别的数"：v2 是真实存在过的上一版。
+    // TELEMETRY（v3 起多 1 字节状态位组）与 PARAM_STATE（v2 起多一组软限位）
+    // 的线长都变过 —— 拿旧版本号编帧必须被拒，否则"版本号"这个字段就不再挡任何东西。
     frame.version = 0x02U;
 
     const mc::EncodeResult result = mc::encodeFrame(frame);
@@ -370,6 +373,9 @@ TEST(StreamDecoderTest, UnknownTypeIsPassedThroughToApplicationLayer) {
 
 TEST(StreamDecoderTest, VersionMismatchSkipsWholeFrameWithoutResync) {
     const Frame frame = makeFrame(MessageType::Telemetry, 2U, {0xAAU, 0xBBU});
+    // v2（上一版）：与 v3 的差别不只是版本号 —— TELEMETRY 的线长也变了
+    // （v3 起多 1 字节状态位组）。解码器**不能**猜"反正差不多就先收下"，
+    // 只能整帧丢弃：猜着解析会得到一条假的曲线。
     const std::vector<std::uint8_t> bytes = encodeWithVersion(frame, 0x02U);
 
     StreamDecoder decoder;
@@ -466,6 +472,26 @@ TEST(ProtocolPolicy, ClearFaultNeedsAckAndIsIdempotent) {
     EXPECT_FALSE(mc::isPeriodicProbe(MessageType::ClearFault));
     EXPECT_TRUE(mc::isAck(MessageType::ClearFaultAck));
     EXPECT_FALSE(mc::isAck(MessageType::ClearFault));
+}
+
+TEST(ProtocolPolicy, ReadParamsNeedsAckAndIsIdempotent) {
+    // 读参数的应答是**带载荷**的（设备存着的那组参数），所以"有没有应答"
+    // 与"读到了什么"是两件事 —— 但这不改变协议层的性质：它仍然是一次
+    // 需要应答的幂等请求，超时后可以重发（重发不改变任何设备状态）。
+    EXPECT_TRUE(mc::isKnown(MessageType::ReadParams));
+    EXPECT_TRUE(mc::isKnown(MessageType::ReadParamsAck));
+    EXPECT_EQ(std::string(mc::toString(MessageType::ReadParams)), "READ_PARAMS");
+    EXPECT_EQ(std::string(mc::toString(MessageType::ReadParamsAck)), "READ_PARAMS_ACK");
+
+    EXPECT_TRUE(mc::requiresAck(MessageType::ReadParams));
+    EXPECT_TRUE(mc::isRetryable(MessageType::ReadParams));
+    EXPECT_FALSE(mc::isPeriodicProbe(MessageType::ReadParams));
+    EXPECT_TRUE(mc::isAck(MessageType::ReadParamsAck));
+    EXPECT_FALSE(mc::isAck(MessageType::ReadParams));
+
+    MessageType ack = MessageType::Nack;
+    EXPECT_TRUE(mc::tryAckOf(MessageType::ReadParams, ack));
+    EXPECT_EQ(ack, MessageType::ReadParamsAck);
 }
 
 TEST(ProtocolPolicy, AckFlagDistinguishesAcksFromRequests) {

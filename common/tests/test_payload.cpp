@@ -83,6 +83,10 @@ TEST(Payload, TelemetryByteLayoutIsPinned) {
     EXPECT_EQ(bytes[17], 0x07U);  // faultCode
     EXPECT_EQ(bytes[18], 0xBBU);  // pwmOutput 小端
     EXPECT_EQ(bytes[19], 0xAAU);
+    // 第 21 个字节是 v3 起的状态位组。它自带独立断言：
+    // 若有人把它并进别的字段（"省一个字节"），这一行会红。
+    value.statusFlags = mc::kTelemetryFlagHomingAttained;
+    EXPECT_EQ(mc::encodeTelemetry(value)[20], mc::kTelemetryFlagHomingAttained);
 }
 
 TEST(Payload, EncodedSizesMatchDeclaredWireSizes) {
@@ -106,6 +110,7 @@ TEST(Payload, TelemetryRoundTrip) {
     value.state = 4U;
     value.faultCode = 9U;
     value.pwmOutput = 65535U;
+    value.statusFlags = mc::kTelemetryFlagHomingAttained;
 
     mc::Telemetry decoded;
     ASSERT_EQ(mc::decodeTelemetry(mc::encodeTelemetry(value).data(), mc::kTelemetrySize, decoded),
@@ -117,6 +122,23 @@ TEST(Payload, TelemetryRoundTrip) {
     EXPECT_EQ(decoded.state, value.state);
     EXPECT_EQ(decoded.faultCode, value.faultCode);
     EXPECT_EQ(decoded.pwmOutput, value.pwmOutput);
+    EXPECT_EQ(decoded.statusFlags, value.statusFlags);
+}
+
+// 位组里的**未知位**必须原样透传，不许被清零：清零等于把"设备说了一件我们
+// 还不懂的事"变成"设备什么都没说"。将来设备多发一位时，旧上位机至少能看到
+// "有东西在变"，而不是一片安静。
+TEST(Payload, UnknownStatusFlagBitsSurviveTheRoundTrip) {
+    mc::Telemetry value;
+    value.statusFlags = 0x80U;   // 本版本没定义这一位
+
+    mc::Telemetry decoded;
+    ASSERT_EQ(mc::decodeTelemetry(mc::encodeTelemetry(value).data(), mc::kTelemetrySize, decoded),
+              PayloadError::None);
+    EXPECT_EQ(decoded.statusFlags, 0x80U);
+    // 正向对照：本版本定义的那一位一样要走完整个往返。
+    EXPECT_EQ(decoded.statusFlags & mc::kTelemetryFlagHomingAttained, 0U);
+    EXPECT_TRUE(mc::isTelemetryValid(value)) << "未知位不该让整帧被判成坏数据（那是 100 Hz 的帧）";
 }
 
 TEST(Payload, SetPidRoundTrip) {

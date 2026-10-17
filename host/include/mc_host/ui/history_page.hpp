@@ -5,6 +5,7 @@
 class QComboBox;
 class QLabel;
 class QPushButton;
+class QShowEvent;
 class QSpinBox;
 class QTableWidget;
 
@@ -32,6 +33,15 @@ public slots:
     void refreshSessions();
     void runQuery();
 
+protected:
+    // 切到本页时**先用当下的计数刷一次**。
+    //
+    // 少了这一步，页面上的统计会停在上一次刷新的那一刻（实际是"刚连上"的时候）：
+    // 屏幕上写着"已落盘 0 条"，而库里明明已经攒了一大段数据 ——
+    // 这种"显示的数和真实状态不一致"恰好是最容易被当成"落库没生效"的那种误导。
+    // 页面不自己打库：查询照旧只在切换本页、按下查询、或链路状态变化时发生。
+    void showEvent(QShowEvent* event) override;
+
 private:
     void exportCsv();
     qint64 currentSessionId() const;
@@ -47,6 +57,7 @@ private:
     QPushButton* queryButton_ = nullptr;
     QLabel* rangeLabel_ = nullptr;
     QTableWidget* sampleTable_ = nullptr;
+    QTableWidget* alarmTable_ = nullptr;
     QTableWidget* eventTable_ = nullptr;
     QTableWidget* commandTable_ = nullptr;
     QPushButton* exportButton_ = nullptr;

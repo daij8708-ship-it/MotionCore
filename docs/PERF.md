@@ -54,7 +54,17 @@ cmake --build build-rel -j"$(nproc)"
 cat /proc/loadavg
 QT_QPA_PLATFORM=offscreen ./build-rel/host/mc_host_bench --seconds=5     # 两档各 5 s
 QT_QPA_PLATFORM=offscreen ./build-rel/host/mc_host_bench --seconds=45    # 长跑：把环形缓冲填满
+
+# 浸泡：单档 100 Hz 连跑 1 小时，每 60 s 打一行进度（内存/缓冲/落库/收帧/拍数）
+QT_QPA_PLATFORM=offscreen ./build-rel/host/mc_host_bench --soak --seconds=3600
 ```
+
+> `--soak` 回答的不是"每拍多贵"，而是"连着跑会不会漂"：内存会不会一直涨、
+> 环形缓冲与报警列表有没有界、落库行数与收帧数对不对得上、库文件是不是按数据量线性长。
+> 它只跑 100 Hz 一档 —— 1 kHz 那档是把设备侧产帧压到极限的压力档，
+> 泡一小时只是在反复撞同一个上限，得不到新信息。
+> 进度行打的是**当下就能读到**的量（计数器、缓冲长度、`/proc/self/status` 的 VmRSS），
+> 中途卡住或内存一路涨，靠这些行才看得出来；跑完的汇总里还会给出起止内存与库文件大小。
 
 **跑多次**（本文的数字是 5 s 档 4 次 + 45 s 档 3 次），报区间与最坏值。
 `--seconds=45` 那档是为了让环形缓冲（容量 4096 ≈ 41 s @100 Hz）真的写满，

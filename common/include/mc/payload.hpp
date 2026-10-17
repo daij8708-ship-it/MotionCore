@@ -37,6 +37,14 @@ inline constexpr float kSanityMaxAbsPositionDeg = 1.0e9F;
 // PID 增益的防荒谬上界（同样不是整定限值，只是不让 1e30 这种值穿透到设备）。
 inline constexpr float kSanityMaxPidGain = 1.0e6F;
 
+// 回零超时的上界（10 分钟）。它与 Wait 步的上限同口径：回零是**低速**动作，
+// 慢是正常的；但"永远走不到"必须有个头 —— 否则设备会一直挂在那儿。
+inline constexpr std::uint32_t kMaxHomeTimeoutMs = 10U * 60U * 1000U;
+
+// 回零速度的防荒谬上界。它比速度环的上界小一个量级，因为回零是
+// **对着一个机械零点撞过去**的动作：速度在这里不是性能，是风险。
+inline constexpr float kSanityMaxHomeSpeedDegPerSec = 360.0F;
+
 // 允许的运行模式编号（与 SetMode::mode 对应）。
 inline constexpr std::uint8_t kMaxRunMode = 2U;
 
@@ -51,6 +59,17 @@ enum class PayloadError : std::uint8_t {
 // 数值是否合理不属于编码的职责，那是 isValidXxx 的事。
 
 // --- 遥测（设备 → 上位机，100 Hz 周期上报）-----------------------------------
+//
+// 遥测里有一个**状态位组**（statusFlags）。为什么不塞进 state：state 是"设备在哪
+// 一步"，位组回答的是"某个过程做完没有" —— 两件事的生命周期不同。把位硬塞进
+// 状态枚举会让状态数随每加一个过程翻倍，而且状态之间本来就不该互相排斥。
+//
+// 目前只定义一位：**本轮回零是否已建立零点**（见下面的说明）。
+// 未定义的位一律**忽略**（与 state / faultCode 一样不参与语义校验）：
+// 将来设备多发一位，不该让整帧遥测在旧上位机那里被判成坏数据 —— 那是 100 Hz
+// 的帧，判坏等于把整条曲线的数据源掐断。
+inline constexpr std::uint8_t kTelemetryFlagHomingAttained = 0x01U;
+
 struct Telemetry {
     std::uint32_t timestampMs = 0U;        // 设备侧时间戳（不是上位机收到时刻）
     float velocityDegPerSec = 0.0F;
@@ -59,8 +78,24 @@ struct Telemetry {
     std::uint8_t state = 0U;               // 设备状态机枚举值（阶段 4 定义）
     std::uint8_t faultCode = 0U;           // 0 = 无故障
     std::uint16_t pwmOutput = 0U;          // 实际输出
+    // 状态位组（v3 起）。未知位忽略。
+    //
+    // **为什么回零需要它**：HOME 的应答只说明"回零开始了"，而"零点建立"这件事
+    // 必须由设备来说，不能由上位机推。上位机能看到的只有状态，而状态分不出下面
+    // 这两种"回到 Ready"：
+    //   · 走到位 → 设备把那里定义成 0 → Ready（HomeCompleted）
+    //   · 中途被 STOP 打断 → Stopping → Ready
+    // 后者只要那一拍的 |v| 本来就在停机门限内（回零本来就是低速），Stopping
+    // 可以在**同一拍**里过去 —— 上位机根本采不到那一格，于是"被打断"会被读成
+    // "回零成功"。这正是本项目最不能接受的那类错：把没发生的事说成发生了。
+    //
+    // 位的语义与 CiA402（CANopen 驱动器子协议）的 *Homing attained* 一致：
+    // **进入回零时清掉、零点建立时置位**。所以它说的是"**这一轮**回零成没成"，
+    // 而不是"这台机器历史上有没有回过零" —— 两者在"上一次回过、这一次又被停住"
+    // 的现场完全不同，而后者恰恰是最容易发生的那一种。
+    std::uint8_t statusFlags = 0U;
 };
-inline constexpr std::size_t kTelemetrySize = 20U;
+inline constexpr std::size_t kTelemetrySize = 21U;
 
 std::vector<std::uint8_t> encodeTelemetry(const Telemetry& value);
 PayloadError decodeTelemetry(const std::uint8_t* data, std::size_t len, Telemetry& out) noexcept;
@@ -114,6 +149,66 @@ inline constexpr std::size_t kClearFaultSize = 1U;
 std::vector<std::uint8_t> encodeClearFault(const ClearFault& value);
 PayloadError decodeClearFault(const std::uint8_t* data, std::size_t len, ClearFault& out) noexcept;
 bool isClearFaultValid(const ClearFault& value) noexcept;
+
+// --- 回零（上位机 → 设备）----------------------------------------------------
+//
+// 回零速度由**上位机**给，不由设备写死：它是每台机器的事（丝杠导程、负载惯量、
+// 行程开关的位置），而"谁更接近现场"这个问题只有一个答案。
+//
+// 速度取**幅值**，方向不在这条报文里：朝零点的方向由设备按自己的坐标判断。
+// 让上位机指定方向，等于让一个看不见坐标系的人指挥电机往哪边撞。
+struct HomeParam {
+    float speedDegPerSec = 0.0F;    // > 0，幅值
+    std::uint32_t timeoutMs = 0U;   // 超过它就判回零失败（进 Fault）
+};
+inline constexpr std::size_t kHomeParamSize = 8U;
+
+std::vector<std::uint8_t> encodeHomeParam(const HomeParam& value);
+PayloadError decodeHomeParam(const std::uint8_t* data, std::size_t len, HomeParam& out) noexcept;
+bool isHomeParamValid(const HomeParam& value) noexcept;
+
+// --- 软限位（上位机 → 设备，并且随参数回读返回）--------------------------------
+//
+// 它是**位置**行程限制，不是速度限制（速度的上界在配置里，见 SimulatorConfig）。
+// enabled = false 时两个数值仍然有意义吗？不 —— 关掉就是关掉，两个数值不参与判定。
+// 所以这里不给"关掉但留个默认值"的折中：关掉时设备一条都不看，界面上也照实写「未启用」。
+struct SoftLimits {
+    bool enabled = false;
+    float minDeg = 0.0F;
+    float maxDeg = 0.0F;
+};
+inline constexpr std::size_t kSoftLimitsSize = 9U;
+
+std::vector<std::uint8_t> encodeSoftLimits(const SoftLimits& value);
+PayloadError decodeSoftLimits(const std::uint8_t* data, std::size_t len, SoftLimits& out) noexcept;
+bool isSoftLimitsValid(const SoftLimits& value) noexcept;
+// 这个位置是否在限位之内。**未启用时恒为 true**，而且这个函数是唯一的判定处：
+// 上位机的预判与设备的实际执法都调它，两边的口径不会漂。
+bool softLimitAllows(const SoftLimits& limits, float positionDeg) noexcept;
+
+// --- 参数回读（设备 → 上位机）------------------------------------------------
+//
+// 设备**存着**的那一组参数：模式 / 目标 / 三个 PID 增益 / 软限位。它是
+// SET_MODE + SET_PID + SET_TARGET + SET_LIMITS 四条命令落地的结果。
+//
+// ⚠️ 它与遥测帧里的 target 字段**不是一回事**：那里报的是"此刻在追什么"
+// （设备没在 Running 时恒为 0，因为那时它确实没在追任何值），这里报的是
+// "被设成了多少"。要核对"下装到底存进去了什么"，只能看这一条。
+struct ParamState {
+    std::uint8_t mode = 0U;
+    float target = 0.0F;
+    float kp = 0.0F;
+    float ki = 0.0F;
+    float kd = 0.0F;
+    // v2 起带上软限位：它必须回得出来，否则上位机只能显示"我以为设成了什么"，
+    // 而"设备到底拿哪一组在拦"这件事就永远是猜的。
+    SoftLimits limits{};
+};
+inline constexpr std::size_t kParamStateSize = 26U;
+
+std::vector<std::uint8_t> encodeParamState(const ParamState& value);
+PayloadError decodeParamState(const std::uint8_t* data, std::size_t len, ParamState& out) noexcept;
+bool isParamStateValid(const ParamState& value) noexcept;
 
 // --- 拒绝（双向）------------------------------------------------------------
 enum class NackReason : std::uint8_t {

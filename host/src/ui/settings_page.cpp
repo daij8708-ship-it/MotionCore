@@ -1,13 +1,18 @@
 #include "mc_host/ui/settings_page.hpp"
 
 #include <QComboBox>
+#include <QDateTime>
 #include <QGridLayout>
 #include <QGroupBox>
+#include <QHBoxLayout>
+#include <QHeaderView>
 #include <QLabel>
 #include <QPushButton>
 #include <QSerialPortInfo>
+#include <QTableWidget>
 #include <QVBoxLayout>
 
+#include "mc_host/audit_text.hpp"
 #include "mc_host/device.hpp"
 #include "mc_host/device_manager.hpp"
 
@@ -17,6 +22,18 @@ namespace {
 // 只列常用的几档。要更多可以自己加 —— 但**不**做成自由文本输入：
 // 打错的波特率会静默地什么都收不到，是排查成本最高的一类错误。
 constexpr int kBaudRates[] = {9600, 19200, 38400, 57600, 115200, 230400, 460800, 921600};
+
+// 审计表最多显示多少行。表能滚，但没人会翻到一万行之前；而"库里一共多少条"
+// 另有标签写着，所以这里截断**不会**让总量变成看不见的数。
+constexpr int kAuditRowsShown = 200;
+constexpr int kAuditColumns = 5;
+
+QString formatAuditTime(qint64 wallMs) {
+    if (wallMs <= 0) {
+        return QStringLiteral("—");
+    }
+    return QDateTime::fromMSecsSinceEpoch(wallMs).toString(QStringLiteral("MM-dd HH:mm:ss"));
+}
 
 }  // namespace
 
@@ -119,6 +136,86 @@ SettingsPage::SettingsPage(DeviceManager& manager, QWidget* parent)
     actions->addWidget(disconnectButton_, 0, 1);
     root->addLayout(actions);
 
+    // --- 操作员角色 -----------------------------------------------------------
+    //
+    // 它守住的是**误操作**，不是人：本软件不做账户认证，能改数据库文件的人也能改流水。
+    // 所以这一页必须把这句话写在脸上，而不是做一个像保险柜的按钮。
+    auto* roleGroup = new QGroupBox(QStringLiteral("操作员（软件权限，不是门禁）"), this);
+    auto* roleGrid = new QGridLayout(roleGroup);
+    roleGrid->addWidget(new QLabel(QStringLiteral("当前角色："), this), 0, 0,
+                        Qt::AlignRight | Qt::AlignTop);
+    roleValue_ = new QLabel(this);
+    roleValue_->setObjectName(QStringLiteral("operatorRoleValue"));
+    roleValue_->setWordWrap(true);
+    roleGrid->addWidget(roleValue_, 0, 1, 1, 2);
+
+    roleGrid->addWidget(new QLabel(QStringLiteral("切换为："), this), 1, 0,
+                        Qt::AlignRight | Qt::AlignTop);
+    roleCombo_ = new QComboBox(this);
+    roleCombo_->setObjectName(QStringLiteral("roleCombo"));
+    // 顺序 = 枚举顺序（Viewer/Operator/Engineer），下标即角色值。
+    roleCombo_->addItem(operatorRoleText(mc::OperatorRole::Viewer),
+                        static_cast<int>(mc::OperatorRole::Viewer));
+    roleCombo_->addItem(operatorRoleText(mc::OperatorRole::Operator),
+                        static_cast<int>(mc::OperatorRole::Operator));
+    roleCombo_->addItem(operatorRoleText(mc::OperatorRole::Engineer),
+                        static_cast<int>(mc::OperatorRole::Engineer));
+    roleGrid->addWidget(roleCombo_, 1, 1);
+    // 刻意做成"选完再点应用"，而不是选中就生效：下拉框是**一滑就变**的控件，
+    // 而角色一改，紧接着的一串按钮就不一样了。多一次点击换"不会滑错"。
+    applyRoleButton_ = new QPushButton(QStringLiteral("应用角色"), this);
+    applyRoleButton_->setObjectName(QStringLiteral("applyRoleButton"));
+    roleGrid->addWidget(applyRoleButton_, 1, 2);
+
+    roleDutyLabel_ = new QLabel(this);
+    roleDutyLabel_->setObjectName(QStringLiteral("roleDutyLabel"));
+    roleDutyLabel_->setWordWrap(true);
+    roleDutyLabel_->setStyleSheet(QStringLiteral("color:#444;"));
+    roleGrid->addWidget(roleDutyLabel_, 2, 0, 1, 3);
+
+    roleGrid->addWidget(
+        new QLabel(QStringLiteral("说明：角色**只在本次运行内有效**，重启回到出厂角色（%1）——"
+                                  "本软件不做账户认证，别把它当门禁用。每一次操作（包括被拒的）"
+                                  "都会记进下面的审计流水，那才是它真正的用处：事后查得出"
+                                  "「谁在什么时候想做什么、成没成、为什么没成」。")
+                       .arg(operatorRoleText(DeviceManager::kDefaultRole)),
+                   this),
+        3, 0, 1, 3);
+    roleGrid->setColumnStretch(1, 1);
+    root->addWidget(roleGroup);
+
+    roleHintLabel_ = new QLabel(this);
+    roleHintLabel_->setObjectName(QStringLiteral("roleHintLabel"));
+    roleHintLabel_->setWordWrap(true);
+    root->addWidget(roleHintLabel_);
+
+    // --- 审计流水 -------------------------------------------------------------
+    auto* auditGroup = new QGroupBox(QStringLiteral("操作审计（谁、什么时候、做了什么、成没成）"), this);
+    auto* auditLayout = new QVBoxLayout(auditGroup);
+    auditCountLabel_ = new QLabel(this);
+    auditCountLabel_->setObjectName(QStringLiteral("auditCountLabel"));
+    auditCountLabel_->setWordWrap(true);
+    auditLayout->addWidget(auditCountLabel_);
+
+    auditTable_ = new QTableWidget(0, kAuditColumns, this);
+    auditTable_->setObjectName(QStringLiteral("auditTable"));
+    auditTable_->setHorizontalHeaderLabels({QStringLiteral("时刻"), QStringLiteral("角色"),
+                                            QStringLiteral("动作"), QStringLiteral("结果"),
+                                            QStringLiteral("对象／原因")});
+    auditTable_->verticalHeader()->setVisible(false);
+    auditTable_->setEditTriggers(QAbstractItemView::NoEditTriggers);
+    auditTable_->horizontalHeader()->setStretchLastSection(true);
+    auditTable_->setMaximumHeight(220);
+    auditLayout->addWidget(auditTable_);
+
+    refreshAuditButton_ = new QPushButton(QStringLiteral("重新读库"), this);
+    refreshAuditButton_->setObjectName(QStringLiteral("refreshAuditButton"));
+    auto* auditRow = new QHBoxLayout();
+    auditRow->addWidget(refreshAuditButton_);
+    auditRow->addStretch(1);
+    auditLayout->addLayout(auditRow);
+    root->addWidget(auditGroup);
+
     hintLabel_ = new QLabel(this);
     hintLabel_->setObjectName(QStringLiteral("settingsHint"));
     hintLabel_->setWordWrap(true);
@@ -143,8 +240,17 @@ SettingsPage::SettingsPage(DeviceManager& manager, QWidget* parent)
             [this](int) { updateSourceUi(); });
     connect(refreshPortsButton_, &QPushButton::clicked, this, &SettingsPage::refreshPorts);
     connect(applyButton_, &QPushButton::clicked, this, &SettingsPage::applySource);
-    connect(disconnectButton_, &QPushButton::clicked, &manager_,
-            &DeviceManager::disconnectDevice);
+    connect(disconnectButton_, &QPushButton::clicked, this, [this]() {
+        if (!manager_.disconnectDevice()) {
+            hintLabel_->setText(QStringLiteral("没有断开：%1").arg(manager_.lastRefusalText()));
+        }
+    });
+    connect(applyRoleButton_, &QPushButton::clicked, this, &SettingsPage::applyRole);
+    connect(roleCombo_, &QComboBox::currentIndexChanged, this, &SettingsPage::refreshRole);
+    connect(refreshAuditButton_, &QPushButton::clicked, this, &SettingsPage::refreshAudit);
+    // 审计是**人的动作频率**（不是 100 Hz 的遥测），所以来一条就重画一次：
+    // 频率低到不值得做节流，而"点完立刻看见它出现在流水里"本身就是这一页的判据。
+    connect(&manager_, &DeviceManager::auditChanged, this, &SettingsPage::refreshAudit);
     connect(&manager_, &DeviceManager::connectionChanged, this,
             &SettingsPage::onConnectionChanged);
 
@@ -154,6 +260,122 @@ SettingsPage::SettingsPage(DeviceManager& manager, QWidget* parent)
     updateSourceUi();
     onConnectionChanged(manager_.isConnected());
     refresh();
+    refreshRole();
+    refreshAudit();
+}
+
+void SettingsPage::refreshRole() {
+    const mc::OperatorRole role = manager_.operatorRole();
+    roleValue_->setText(QStringLiteral("%1（%2）")
+                            .arg(operatorRoleText(role))
+                            .arg(QString::fromLatin1(mc::operatorRoleToken(role))));
+
+    // 职责说明跟着**下拉框里选中的那个**走，而不是跟着当前角色走：
+    // 人在按下"应用角色"之前想知道的恰恰是"换成它会怎样"。
+    const auto selected = static_cast<mc::OperatorRole>(roleCombo_->currentData().toInt());
+    roleDutyLabel_->setText(QStringLiteral("【%1】%2")
+                                .arg(operatorRoleText(selected), operatorRoleDutyText(selected)));
+
+    // 换角色本身也要"管理角色"权限。一个观察者不该能把自己升上去 ——
+    // 所以这里把按钮关掉**并说明为什么**，而不是让它点了没反应。
+    const bool maySwitch = mc::roleHasPermission(role, mc::kPermissionManageRole);
+    applyRoleButton_->setEnabled(maySwitch);
+    applyRoleButton_->setToolTip(
+        maySwitch ? QString()
+                  : QStringLiteral("当前角色是「%1」，没有「管理角色」权限："
+                                   "换角色这件事本身也要权限（重启可回到出厂角色 %2）")
+                        .arg(operatorRoleText(role),
+                             operatorRoleText(DeviceManager::kDefaultRole)));
+}
+
+void SettingsPage::applyRole() {
+    const auto selected = static_cast<mc::OperatorRole>(roleCombo_->currentData().toInt());
+    if (selected == manager_.operatorRole()) {
+        roleHintLabel_->setText(QStringLiteral("角色没变：还是「%1」。")
+                                    .arg(operatorRoleText(selected)));
+        return;
+    }
+    if (!manager_.setOperatorRole(selected)) {
+        roleHintLabel_->setText(QStringLiteral("没有换：%1").arg(manager_.lastRefusalText()));
+        return;
+    }
+    roleHintLabel_->setText(QStringLiteral("已是「%1」。%2")
+                                .arg(operatorRoleText(selected), operatorRoleDutyText(selected)));
+    refreshRole();
+}
+
+void SettingsPage::refreshAudit() {
+    const auto put = [this](int row, qint64 wallMs, mc::OperatorRole role,
+                            mc::OperatorAction action, bool dispatched, const QString& subject,
+                            const QString& reason) {
+        auditTable_->setItem(row, 0, new QTableWidgetItem(formatAuditTime(wallMs)));
+        auditTable_->setItem(row, 1, new QTableWidgetItem(operatorRoleText(role)));
+        auditTable_->setItem(row, 2, new QTableWidgetItem(operatorActionText(action)));
+        // 「结果」列写的是**发生没发生**，不是"允许不允许"：
+        // 因此它有三种话要说 —— 执行了、被拦下了（理由在右列）、以及本来就是空的。
+        auto* resultItem = new QTableWidgetItem(
+            dispatched ? QStringLiteral("已执行") : QStringLiteral("未执行"));
+        if (!dispatched) {
+            resultItem->setForeground(QBrush(QColor(QStringLiteral("#b00020"))));
+        }
+        auditTable_->setItem(row, 3, resultItem);
+        const QString detail = dispatched ? subject
+                                          : QStringLiteral("%1｜%2").arg(subject, reason);
+        auditTable_->setItem(row, 4, new QTableWidgetItem(detail));
+    };
+
+    const mc::AuditLog& log = manager_.audit();
+    QString error;
+    const bool fromDb = manager_.historyOpen();
+    std::vector<HistoryStore::AuditRow> rows;
+    if (fromDb) {
+        rows = manager_.history()->audits(kAuditRowsShown, error);
+    }
+
+    if (!fromDb || !error.isEmpty()) {
+        // 库读不到就退回内存里那一份，并且**说清楚现在看的是哪一份** ——
+        // 不说明的话，"库里应该有、这里却没有"会被当成"那件事没发生过"。
+        const std::deque<mc::AuditEntry>& entries = log.entries();
+        auditTable_->setRowCount(static_cast<int>(entries.size()));
+        int row = static_cast<int>(entries.size()) - 1;   // 最近的在上
+        for (const mc::AuditEntry& entry : entries) {
+            put(row, static_cast<qint64>(entry.wallMs), entry.role, entry.action, entry.dispatched,
+                QString::fromStdString(entry.subject), QString::fromStdString(entry.reason));
+            --row;
+        }
+        auditCountLabel_->setText(
+            fromDb ? QStringLiteral("读库失败（%1），下面是本次运行的内存流水：共 %2 条"
+                                    "（已执行 %3 / 未执行 %4）。")
+                         .arg(error)
+                         .arg(log.recordedTotal())
+                         .arg(log.dispatchedTotal())
+                         .arg(log.notDispatchedTotal())
+                   : QStringLiteral("历史库没打开，下面是本次运行的内存流水：共 %1 条"
+                                    "（已执行 %2 / 未执行 %3），窗口上限 %4 条、已挤掉 %5 条。")
+                         .arg(log.recordedTotal())
+                         .arg(log.dispatchedTotal())
+                         .arg(log.notDispatchedTotal())
+                         .arg(static_cast<int>(log.capacity()))
+                         .arg(static_cast<int>(log.discarded())));
+        auditTable_->resizeColumnsToContents();
+        return;
+    }
+
+    auditTable_->setRowCount(static_cast<int>(rows.size()));
+    for (int row = 0; row < static_cast<int>(rows.size()); ++row) {
+        const HistoryStore::AuditRow& entry = rows[static_cast<std::size_t>(row)];
+        put(row, entry.wallMs, static_cast<mc::OperatorRole>(entry.role),
+            static_cast<mc::OperatorAction>(entry.action), entry.dispatched, entry.subject,
+            entry.reason);
+    }
+    auditTable_->resizeColumnsToContents();
+    auditCountLabel_->setText(
+        QStringLiteral("库里共 %1 条（本页显示最近 %2 条）；本次运行内存窗口 %3 条、已挤掉 %4 条。"
+                       "流水是**追加**的：同一条操作做两次就是两条记录。")
+            .arg(static_cast<int>(rows.size()))
+            .arg(kAuditRowsShown)
+            .arg(log.recordedTotal())
+            .arg(static_cast<int>(log.discarded())));
 }
 
 void SettingsPage::refreshPorts() {
@@ -203,7 +425,9 @@ void SettingsPage::applySource() {
     if (sourceCombo_->currentIndex() == 0) {
         ok = manager_.useSimulatedDevice();
         if (!ok) {
-            error = QStringLiteral("已连接中：请先断开再换数据源");
+            // 失败原因不止一种（没权限 / 已连接中），所以**问管理层的原话**，
+            // 不在这里硬写一句"请先断开"—— 那会把权限问题说成链路问题。
+            error = manager_.lastRefusalText();
         }
     } else {
         SerialTransport::Config config;

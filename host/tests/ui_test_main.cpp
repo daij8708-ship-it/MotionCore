@@ -2,6 +2,7 @@
 
 #include <QApplication>
 #include <QByteArray>
+#include <QStandardPaths>
 #include <QtGlobal>
 
 // 界面用例的入口：必须建 QApplication（控件构造时就要求它存在）。
@@ -11,6 +12,8 @@ int main(int argc, char** argv) {
     if (qEnvironmentVariableIsEmpty("QT_QPA_PLATFORM")) {
         qputenv("QT_QPA_PLATFORM", QByteArrayLiteral("offscreen"));
     }
+    // 同 core_test_main：用例不往用户数据目录里写历史库（理由见那边）。
+    QStandardPaths::setTestModeEnabled(true);
 
     QApplication app(argc, argv);
     ::testing::InitGoogleTest(&argc, argv);

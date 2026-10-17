@@ -16,39 +16,65 @@ endif()
 set(CMAKE_AUTOMOC ON)
 
 set(MC_HOST_SOURCES
+    src/alarm_text.cpp
+    src/audit_text.cpp
+    src/axis_group.cpp
     src/curve_model.cpp
     src/device.cpp
     src/device_manager.cpp
     src/history_store.cpp
+    src/interlock_text.cpp
+    src/log_text.cpp
+    src/recipe_store.cpp
+    src/recipe_text.cpp
+    src/sequence_store.cpp
+    src/sequence_text.cpp
     src/serial_transport.cpp
     src/ui/alarm_page.cpp
+    src/ui/axis_page.cpp
     src/ui/curve_page.cpp
     src/ui/curve_plot.cpp
     src/ui/debug_page.cpp
     src/ui/history_page.cpp
+    src/ui/log_page.cpp
     src/ui/main_window.cpp
     src/ui/motion_page.cpp
     src/ui/overview_page.cpp
     src/ui/param_page.cpp
+    src/ui/recipe_page.cpp
+    src/ui/sequence_page.cpp
     src/ui/settings_page.cpp
 )
 
 set(MC_HOST_HEADERS
+    include/mc_host/alarm_text.hpp
+    include/mc_host/audit_text.hpp
+    include/mc_host/axis_group.hpp
     include/mc_host/curve_model.hpp
     include/mc_host/device.hpp
     include/mc_host/device_manager.hpp
     include/mc_host/history_store.hpp
+    include/mc_host/interlock_text.hpp
+    include/mc_host/log_text.hpp
+    include/mc_host/recipe_store.hpp
+    include/mc_host/recipe_text.hpp
+    include/mc_host/sequence_store.hpp
+    include/mc_host/sequence_text.hpp
     include/mc_host/serial_transport.hpp
     include/mc_host/telemetry_ring.hpp
     include/mc_host/ui/alarm_page.hpp
+    include/mc_host/ui/axis_page.hpp
     include/mc_host/ui/curve_page.hpp
     include/mc_host/ui/curve_plot.hpp
     include/mc_host/ui/debug_page.hpp
     include/mc_host/ui/history_page.hpp
+    include/mc_host/ui/log_page.hpp
     include/mc_host/ui/main_window.hpp
     include/mc_host/ui/motion_page.hpp
     include/mc_host/ui/overview_page.hpp
     include/mc_host/ui/param_page.hpp
+    include/mc_host/ui/recipe_page.hpp
+    include/mc_host/ui/sequence_page.hpp
     include/mc_host/ui/settings_page.hpp
 )
 

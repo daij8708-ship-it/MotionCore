@@ -111,6 +111,24 @@ bool HistoryStore::ensureSchema() {
                        "t_ms INTEGER NOT NULL,"
                        "wall_ms INTEGER NOT NULL,"
                        "text TEXT NOT NULL)"),
+        // 报警单独一张表，而不是把代码/等级塞进上面那张 event 的文本里：
+        // 一旦只留下"人看得懂的一句话"，"查一下这一段里有多少条 Error 以上没确认"
+        // 就再也查不出来了 —— 而那正是报警分级存在的全部意义。
+        // 唯一键里的 first_wall_ms 见 upsertAlarm 的说明（清屏之后同码再报是另一起）。
+        QStringLiteral("CREATE TABLE IF NOT EXISTS alarm ("
+                       "session_id INTEGER NOT NULL,"
+                       "code INTEGER NOT NULL,"
+                       "level INTEGER NOT NULL,"
+                       "first_t_ms INTEGER NOT NULL,"
+                       "last_t_ms INTEGER NOT NULL,"
+                       "first_wall_ms INTEGER NOT NULL,"
+                       "last_wall_ms INTEGER NOT NULL,"
+                       "occurrences INTEGER NOT NULL,"
+                       "acknowledged INTEGER NOT NULL,"
+                       "ack_wall_ms INTEGER NOT NULL,"
+                       "active INTEGER NOT NULL,"
+                       "detail TEXT NOT NULL,"
+                       "UNIQUE(session_id, code, first_wall_ms))"),
         QStringLiteral("CREATE TABLE IF NOT EXISTS command ("
                        "session_id INTEGER NOT NULL,"
                        "seq INTEGER NOT NULL,"
@@ -119,6 +137,21 @@ bool HistoryStore::ensureSchema() {
                        "status INTEGER NOT NULL,"
                        "nack_reason INTEGER NOT NULL,"
                        "UNIQUE(session_id, seq))"),
+        // 审计与上面几张表的姿态不同：它是**追加**的流水，不是会变的当前状态。
+        // 所以既不做 UPSERT，也不按 (session_id, seq) 去唯一化 —— 那种唯一键会
+        // 让"同一个动作做过两次"里的第二次把第一次替换掉，而审计要记的恰恰是"几次"。
+        // 会话号只是其中一列（0 = 当时没连接），不是键。
+        QStringLiteral("CREATE TABLE IF NOT EXISTS audit ("
+                       "id INTEGER PRIMARY KEY AUTOINCREMENT,"
+                       "wall_ms INTEGER NOT NULL,"
+                       "t_ms INTEGER NOT NULL,"
+                       "session_id INTEGER NOT NULL,"
+                       "role INTEGER NOT NULL,"
+                       "action INTEGER NOT NULL,"
+                       "subject TEXT NOT NULL,"
+                       "dispatched INTEGER NOT NULL,"
+                       "reason TEXT NOT NULL)"),
+        QStringLiteral("CREATE INDEX IF NOT EXISTS idx_audit_wall ON audit(wall_ms)"),
     };
     for (const QString& sql : schema) {
         if (!exec(sql, error)) {
@@ -194,6 +227,33 @@ void HistoryStore::addEvent(std::uint64_t tMs, qint64 wallMs, const QString& tex
     (void)query.exec();
 }
 
+void HistoryStore::upsertAlarm(const mc::AlarmEntry& entry) {
+    if (!open_ || sessionId_ <= 0) {
+        return;
+    }
+    // 与 addEvent 同理：报警必须先落盘。掉电时最要紧的那条恰恰是刚发生的那条。
+    flush();
+
+    QSqlQuery query(db_);
+    query.prepare(QStringLiteral(
+        "INSERT OR REPLACE INTO alarm (session_id, code, level, first_t_ms, last_t_ms, "
+        "first_wall_ms, last_wall_ms, occurrences, acknowledged, ack_wall_ms, active, detail) "
+        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"));
+    query.addBindValue(sessionId_);
+    query.addBindValue(static_cast<int>(entry.code));
+    query.addBindValue(static_cast<int>(entry.level));
+    query.addBindValue(static_cast<qint64>(entry.firstTMs));
+    query.addBindValue(static_cast<qint64>(entry.lastTMs));
+    query.addBindValue(static_cast<qint64>(entry.firstWallMs));
+    query.addBindValue(static_cast<qint64>(entry.wallMs));
+    query.addBindValue(static_cast<int>(entry.occurrences));
+    query.addBindValue(entry.acknowledged ? 1 : 0);
+    query.addBindValue(static_cast<qint64>(entry.ackWallMs));
+    query.addBindValue(entry.active ? 1 : 0);
+    query.addBindValue(QString::fromStdString(entry.detail));
+    (void)query.exec();
+}
+
 void HistoryStore::upsertCommand(std::uint64_t sentMs, std::uint16_t seq, const QString& name,
                                  int status, int nackReason) {
     if (!open_ || sessionId_ <= 0) {
@@ -214,6 +274,40 @@ void HistoryStore::upsertCommand(std::uint64_t sentMs, std::uint16_t seq, const 
     query.addBindValue(status);
     query.addBindValue(nackReason);
     (void)query.exec();
+}
+
+void HistoryStore::addAudit(std::uint64_t elapsedMs, qint64 wallMs, int role, int action,
+                            const QString& subject, bool dispatched, const QString& reason) {
+    // ⚠ 这里**不判 sessionId_ > 0**：改数据源、切角色、会话没就绪就被拦下的命令，
+    // 都发生在"没有会话"的时候 —— 用 sessionId_ <= 0 当作"不记"的条件，
+    // 恰好会把最该留痕的那几件事丢掉。session_id 记 0 只是如实说明当时没有会话。
+    if (!open_) {
+        return;
+    }
+    // 与 addEvent 同理：审计必须先落盘。掉电时最要紧的恰恰是刚发生的那一条。
+    flush();
+
+    QSqlQuery query(db_);
+    query.prepare(QStringLiteral(
+        "INSERT INTO audit (wall_ms, t_ms, session_id, role, action, subject, dispatched, reason) "
+        "VALUES (?, ?, ?, ?, ?, ?, ?, ?)"));
+    query.addBindValue(wallMs);
+    query.addBindValue(static_cast<qint64>(elapsedMs));
+    query.addBindValue(sessionId_);
+    query.addBindValue(role);
+    query.addBindValue(action);
+    query.addBindValue(subject);
+    query.addBindValue(dispatched ? 1 : 0);
+    // ⚠ QString()（null）会被 Qt 绑成 SQL **NULL**，而这两列是 NOT NULL
+    // （"总是有一份值，只是可能为空"）。空文本必须写成 ''，不能写成 NULL ——
+    // 否则整条流水会被约束挡掉，而它恰恰是"这件事发生过"的唯一凭证。
+    query.addBindValue(reason.isNull() ? QString::fromLatin1("") : reason);
+    // 与 upsertAlarm / addEvent 不同，这里**留下失败原因**：审计写不进去这件事
+    // 必须看得见。默默丢掉一条流水，事后查起来就是"这件事从没发生过"，
+    // 而那正是审计最不能出的错。
+    if (!query.exec()) {
+        error_ = QStringLiteral("写审计失败：%1").arg(query.lastError().text());
+    }
 }
 
 void HistoryStore::flush() {
@@ -386,6 +480,42 @@ std::vector<HistoryStore::EventRow> HistoryStore::events(qint64 sessionId, QStri
     return out;
 }
 
+std::vector<HistoryStore::AlarmRow> HistoryStore::alarms(qint64 sessionId, QString& error) {
+    std::vector<AlarmRow> out;
+    if (!open_) {
+        error = error_;
+        return out;
+    }
+    flush();
+
+    QSqlQuery query(db_);
+    query.prepare(QStringLiteral(
+        "SELECT code, level, first_t_ms, last_t_ms, first_wall_ms, last_wall_ms, occurrences, "
+        "acknowledged, ack_wall_ms, active, detail FROM alarm WHERE session_id = ? "
+        "ORDER BY first_wall_ms ASC, code ASC"));
+    query.addBindValue(sessionId);
+    if (!query.exec()) {
+        error = query.lastError().text();
+        return out;
+    }
+    while (query.next()) {
+        AlarmRow row;
+        row.code = query.value(0).toInt();
+        row.level = query.value(1).toInt();
+        row.firstTMs = query.value(2).toLongLong();
+        row.lastTMs = query.value(3).toLongLong();
+        row.firstWallMs = query.value(4).toLongLong();
+        row.lastWallMs = query.value(5).toLongLong();
+        row.occurrences = query.value(6).toInt();
+        row.acknowledged = query.value(7).toInt() != 0;
+        row.ackWallMs = query.value(8).toLongLong();
+        row.active = query.value(9).toInt() != 0;
+        row.detail = query.value(10).toString();
+        out.push_back(row);
+    }
+    return out;
+}
+
 std::vector<HistoryStore::CommandRow> HistoryStore::commands(qint64 sessionId,
                                                             QString& error) {
     std::vector<CommandRow> out;
@@ -416,9 +546,43 @@ std::vector<HistoryStore::CommandRow> HistoryStore::commands(qint64 sessionId,
     return out;
 }
 
-qint64 HistoryStore::countSamples(qint64 sessionId, qint64 fromTMs, qint64 toTMs,
-                                  QString& error) {
+std::vector<HistoryStore::AuditRow> HistoryStore::audits(int limit, QString& error) {
+    std::vector<AuditRow> out;
     if (!open_) {
+        error = error_;
+        return out;
+    }
+    flush();
+
+    // 倒序（最近的在上）：与界面上的命令行、命令日志同一个习惯。
+    // LIMIT 0 在 SQLite 里是"不返回任何行"，所以 0 表示不设限时要**不写 LIMIT**，
+    // 而不是写一个 LIMIT 0 上去。
+    QString sql = QStringLiteral(
+        "SELECT wall_ms, role, action, subject, dispatched, reason FROM audit "
+        "ORDER BY wall_ms DESC, id DESC");
+    if (limit > 0) {
+        sql += QStringLiteral(" LIMIT %1").arg(limit);
+    }
+    QSqlQuery query(db_);
+    if (!query.exec(sql)) {
+        error = query.lastError().text();
+        return out;
+    }
+    while (query.next()) {
+        AuditRow row;
+        row.wallMs = query.value(0).toLongLong();
+        row.role = query.value(1).toInt();
+        row.action = query.value(2).toInt();
+        row.subject = query.value(3).toString();
+        row.dispatched = query.value(4).toInt() != 0;
+        row.reason = query.value(5).toString();
+        out.push_back(row);
+    }
+    return out;
+}
+
+qint64 HistoryStore::countSamples(qint64 sessionId, qint64 fromTMs, qint64 toTMs,
+                                  QString& error) {    if (!open_) {
         error = error_;
         return 0;
     }

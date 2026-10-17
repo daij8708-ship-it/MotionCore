@@ -5,15 +5,25 @@
 #   它必须能被纯 g++ + GoogleTest 构建与测试，以便在没有 Qt 的环境下验证。
 add_library(mc_core STATIC
     src/ack_tracker.cpp
+    src/alarm.cpp
+    src/audit.cpp
+    src/axis_group.cpp
     src/crc16.cpp
     src/device_simulator.cpp
     src/device_state.cpp
+    src/fd_transport.cpp
     src/frame_codec.cpp
     src/host_session.cpp
+    src/interlock.cpp
     src/link_monitor.cpp
+    src/log.cpp
     src/loopback_transport.cpp
     src/payload.cpp
     src/protocol.cpp
+    src/pty.cpp
+    src/recipe.cpp
+    src/sequence.cpp
+    src/sim_loop.cpp
 )
 
 target_include_directories(mc_core

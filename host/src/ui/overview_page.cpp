@@ -1,5 +1,7 @@
 #include "mc_host/ui/overview_page.hpp"
 
+#include <cstdint>
+
 #include <QFont>
 #include <QGridLayout>
 #include <QGroupBox>
@@ -8,6 +10,7 @@
 #include <QVBoxLayout>
 
 #include "mc/device_state.hpp"
+#include "mc_host/alarm_text.hpp"
 #include "mc_host/device.hpp"
 #include "mc_host/device_manager.hpp"
 
@@ -109,7 +112,8 @@ OverviewPage::OverviewPage(DeviceManager& manager, QWidget* parent)
             &OverviewPage::onConnectionChanged);
     connect(&manager_, &DeviceManager::statsRefreshed, this, &OverviewPage::refresh);
     connect(&manager_, &DeviceManager::commandLogChanged, this, &OverviewPage::refresh);
-    connect(&manager_, &DeviceManager::alarmRaised, this, [this](const QString&) { refresh(); });
+    connect(&manager_, &DeviceManager::alarmRaised, this,
+            [this](std::uint16_t, const QString&) { refresh(); });
 
     onConnectionChanged(manager_.isConnected());
     refresh();
@@ -255,12 +259,21 @@ void OverviewPage::refreshStatsSection() {
                                 .arg(device->hostEncodeFailures())
                                 .arg(device->hostSendFailures()));
 
-    const QVector<AlarmRecord>& alarms = manager_.alarms();
-    alarmValue_->setText(alarms.isEmpty()
-                             ? QStringLiteral("无（累计 0 条）")
-                             : QStringLiteral("共 %1 条，最近：%2")
-                                   .arg(alarms.size())
-                                   .arg(alarms.back().text));
+    const mc::AlarmLog& alarms = manager_.alarms();
+    const std::size_t pending = alarms.unacknowledgedRequiringAck();
+    QString summary = QStringLiteral("累计 %1 条")
+                          .arg(static_cast<qulonglong>(alarms.raisedTotal()));
+    if (pending > 0U) {
+        // 拦住启动这件事必须在总览上也看得见 —— 否则"按了启动没反应"会变成一个谜。
+        summary += QStringLiteral("，未确认 %1 条（拦住启动）").arg(static_cast<int>(pending));
+    }
+    if (!alarms.entries().empty()) {
+        const mc::AlarmEntry& newest = alarms.entries().back();
+        summary += QStringLiteral("，最近：%1｜%2")
+                       .arg(alarmLevelText(newest.level))
+                       .arg(alarmText(newest.code));
+    }
+    alarmValue_->setText(summary);
 }
 
 }  // namespace mchost

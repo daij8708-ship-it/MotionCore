@@ -17,6 +17,7 @@
 // 运行：
 //   ./mc_host_bench --seconds=5              两档各跑 5 s
 //   ./mc_host_bench --seconds=45             长跑，把环形缓冲填满（曲线最坏情况）
+//   ./mc_host_bench --soak --seconds=3600    浸泡：单档 100 Hz 连跑，定期打进度与内存
 //   QT_QPA_PLATFORM=xcb ./mc_host_bench      想在真显示下测就自己设平台
 //
 // 两点必须说清、否则数字会被误读：
@@ -25,6 +26,10 @@
 //      （离屏平台**会**投递绘制事件，只是只投给当前可见页；本机 5 s 实测约 180 次。）
 //   ② 上位机单拍最多从链路读 512 B，一帧遥测 30 B，即单拍上限约 17 帧。
 //      遥测再快也不会让单拍读得更多，只会让读不完的部分留在设备侧队列里。
+//
+// 另外：本程序把历史库显式落在**临时目录**（见 benchDbPath），并把它自己的
+// 应用数据目录隔离出去。真实运行的记录只该有产品（`mc_host`）那一份 ——
+// 一把尺子往里面灌几十万行垃圾，会让人再也分不清哪些是实际跑出来的。
 // ---------------------------------------------------------------------------
 #include <algorithm>
 #include <cmath>
@@ -34,8 +39,13 @@
 #include <vector>
 
 #include <QApplication>
+#include <QByteArray>
 #include <QComboBox>
+#include <QDir>
 #include <QElapsedTimer>
+#include <QFile>
+#include <QList>
+#include <QStandardPaths>
 #include <QString>
 #include <QStringList>
 #include <QTimer>
@@ -57,19 +67,75 @@ constexpr int kCurveRefreshSamples = 50;
 
 struct Options {
     int seconds = 5;
+    bool soak = false;
 };
 
 Options parseOptions(const QStringList& args) {
     Options options;
+    bool secondsGiven = false;
     for (const QString& arg : args) {
         if (arg.startsWith(QStringLiteral("--seconds="))) {
             const int value = arg.section('=', 1).toInt();
             if (value > 0) {
                 options.seconds = value;
+                secondsGiven = true;
+            }
+        } else if (arg == QStringLiteral("--soak")) {
+            options.soak = true;
+        }
+    }
+    // 浸泡默认跑满一小时：它回答的是"长时间跑会不会漂"，短跑问不出这个问题。
+    if (options.soak && !secondsGiven) {
+        options.seconds = 3600;
+    }
+    return options;
+}
+
+// 历史库落在**临时目录**，且每次开跑前先删掉 ——
+// ① 不污染用户数据目录里那份"真实运行记录"；
+// ② 从空库起算，文件增长才是这次跑出来的，而不是上次留下的。
+QString benchDbPath() {
+    return QDir::tempPath() + QStringLiteral("/mc_host_bench.db");
+}
+
+// 进程常驻内存（KB）。**读不到就说读不到（-1）**，不拿 0 冒充"很小"。
+long long processRssKb() {
+#if defined(__linux__)
+    QFile status(QStringLiteral("/proc/self/status"));
+    if (!status.open(QIODevice::ReadOnly)) {
+        return -1;
+    }
+    // ⚠️ 这里**不能**用 atEnd() 当循环条件：/proc 里的文件 size() 恒为 0，
+    // 而 QFile::atEnd() 会据此认为"已经到末尾"，于是循环体一次都不执行 ——
+    // 内存那一项永远显示"读不到"。用 readLine() 返回空来判断真正的结尾。
+    for (;;) {
+        const QByteArray line = status.readLine();
+        if (line.isEmpty()) {
+            break;
+        }
+        if (line.startsWith("VmRSS:")) {
+            const QList<QByteArray> parts = line.mid(6).trimmed().split(' ');
+            if (!parts.isEmpty()) {
+                bool ok = false;
+                const long long kb = parts.first().toLongLong(&ok);
+                return ok ? kb : -1;
             }
         }
     }
-    return options;
+#endif
+    return -1;
+}
+
+// 库文件占的字节数（含 WAL）。用来回答"跑一小时之后它有多大"。
+long long storeBytes() {
+    long long total = 0;
+    for (const QString& suffix : {QStringLiteral(""), QStringLiteral("-wal")}) {
+        const QFile file(benchDbPath() + suffix);
+        if (file.exists()) {
+            total += file.size();
+        }
+    }
+    return total;
 }
 
 struct Summary {
@@ -136,13 +202,21 @@ struct PhaseReport {
     std::uint64_t deviceBacklogDropped = 0U;
     std::uint64_t plotRepaints = 0U;
     std::uint64_t ackTimeoutsFaulted = 0U;
+    // 落库与内存：长时间跑最该盯的两项（文件会不会爆、内存会不会一直涨）。
+    bool historyOpen = false;
+    std::uint64_t historySamples = 0U;
+    std::uint64_t historyTransactions = 0U;
+    long long storeBytes = -1;
+    long long rssStartKb = -1;
+    long long rssEndKb = -1;
     Summary tickBusy;
     Summary tickInterval;
     Summary curveRefresh;
     Summary render;
 };
 
-PhaseReport runPhase(const QString& label, std::uint32_t telemetryPeriodMs, int seconds) {
+PhaseReport runPhase(const QString& label, std::uint32_t telemetryPeriodMs, int seconds,
+                     int progressEverySeconds = 0) {
     PhaseReport report;
     report.label = label;
     report.telemetryPeriodMs = telemetryPeriodMs;
@@ -156,10 +230,21 @@ PhaseReport runPhase(const QString& label, std::uint32_t telemetryPeriodMs, int 
     manager.setDevice(std::move(sim));
     manager.enableTimingDiagnostics(true, kTimingSampleCapacity);
 
+    // 每次从空库起：见 benchDbPath() 的说明。
+    QFile::remove(benchDbPath());
+    QFile::remove(benchDbPath() + QStringLiteral("-wal"));
+    QFile::remove(benchDbPath() + QStringLiteral("-shm"));
+    report.historyOpen = manager.openHistory(benchDbPath());
+
     mchost::MainWindow window(manager);
     window.show();
     (void)window.showTab(2);
     QApplication::processEvents();
+
+    // 内存基线必须取在**窗口建好之后**：控件、字体、Qt 平台插件的一次性开销
+    // 有几十 MB，取早了的话"起→末"的差值量的是"建了个窗口"，与"跑久了会不会涨"
+    // 完全无关。
+    report.rssStartKb = processRssKb();
 
     // 时间窗选最宽的 30 s：抽稀要处理的样本最多，这就是最坏情况。
     if (auto* combo = window.findChild<QComboBox*>(QStringLiteral("windowCombo")); combo != nullptr) {
@@ -180,8 +265,39 @@ PhaseReport runPhase(const QString& label, std::uint32_t telemetryPeriodMs, int 
     QTimer::singleShot(500, &manager, [&manager]() { manager.sendSetMode(1); });
     QTimer::singleShot(700, &manager, [&manager]() { manager.sendStart(); });
     QTimer::singleShot(900, &manager, [&manager]() { manager.sendSetTarget(200.0); });
+
+    // 浸泡模式的进度行。它打的都是**当下就能读到**的量（计数器、环形缓冲、内存），
+    // 而不是"跑完才知道"的统计 —— 中途卡住/内存一路涨，靠这行才看得出来。
+    if (progressEverySeconds > 0) {
+        auto* progress = new QTimer(&manager);
+        progress->setInterval(progressEverySeconds * 1000);
+        QObject::connect(progress, &QTimer::timeout, &manager, [&manager, &wall]() {
+            const mchost::HistoryStore* store = manager.history();
+            std::printf(
+                "  [%7.1f s] 内存 %8lld KB | 环形缓冲 %5zu（覆盖丢弃 %llu）| 报警 %3d | "
+                "落库 %llu 行 / %llu 事务 | 收遥测 %llu | 拍 %llu\n",
+                static_cast<double>(wall.elapsed()) / 1000.0, processRssKb(),
+                manager.telemetry().size(),
+                static_cast<unsigned long long>(manager.telemetry().discarded()),
+                static_cast<int>(manager.alarms().entries().size()),
+                static_cast<unsigned long long>((store != nullptr) ? store->samplesWritten() : 0U),
+                static_cast<unsigned long long>((store != nullptr) ? store->transactions() : 0U),
+                static_cast<unsigned long long>(manager.device()->telemetryAcceptedTotal()),
+                static_cast<unsigned long long>(manager.ticks()));
+            std::fflush(stdout);
+        });
+        progress->start();
+    }
+
     QTimer::singleShot(seconds * 1000, &manager, []() { QApplication::quit(); });
     QApplication::exec();
+
+    report.rssEndKb = processRssKb();
+    report.storeBytes = storeBytes();
+    if (const mchost::HistoryStore* store = manager.history(); store != nullptr) {
+        report.historySamples = store->samplesWritten();
+        report.historyTransactions = store->transactions();
+    }
 
     report.wallSeconds = static_cast<double>(wall.elapsed()) / 1000.0;
     report.ticks = manager.ticks();
@@ -291,6 +407,29 @@ void printReport(const PhaseReport& report) {
                 static_cast<unsigned long long>(report.plotRepaints));
     printSummary("一次界面刷新  ", report.curveRefresh, "us");
     printSummary("一次整页绘制  ", report.render, "us");
+
+    // 落库与内存单列：它们是"跑一小时会怎样"的两个主要风险面。
+    if (!report.historyOpen) {
+        std::printf("  落库(SQLite)    : **未打开**（打不开历史库不影响采集，但这轮没有落库数据）\n");
+    } else {
+        const double perTransaction =
+            (report.historyTransactions > 0U)
+                ? static_cast<double>(report.historySamples) /
+                      static_cast<double>(report.historyTransactions)
+                : 0.0;
+        std::printf("  落库(SQLite)    : %llu 行 / %llu 个事务（平均 %.1f 行/事务，批量上限 %zu）"
+                    "｜文件 %.2f MB（含 WAL）\n",
+                    static_cast<unsigned long long>(report.historySamples),
+                    static_cast<unsigned long long>(report.historyTransactions), perTransaction,
+                    mchost::HistoryStore::kBatchSize,
+                    static_cast<double>(report.storeBytes) / (1024.0 * 1024.0));
+    }
+    if (report.rssStartKb >= 0 && report.rssEndKb >= 0) {
+        std::printf("  进程常驻内存    : 起 %lld KB → 末 %lld KB（Δ %+lld KB）\n",
+                    report.rssStartKb, report.rssEndKb, report.rssEndKb - report.rssStartKb);
+    } else {
+        std::printf("  进程常驻内存    : 读不到（本平台没有 /proc/self/status）—— 这项**未测**\n");
+    }
 }
 
 }  // namespace
@@ -301,12 +440,19 @@ int main(int argc, char** argv) {
     if (qEnvironmentVariableIsEmpty("QT_QPA_PLATFORM")) {
         qputenv("QT_QPA_PLATFORM", "offscreen");
     }
+    // 一把尺子不该在用户数据目录里留东西。切到 QStandardPaths 的测试模式之后，
+    // DeviceManager 构造函数用的那个默认路径也落在隔离目录里 ——
+    // 否则它会在 ~/.local/share/mc_host_bench/ 下建一个空库文件（只有表结构、
+    // 不含数据，但仍然是"跑一次基准就在用户目录里多一个文件"）。
+    QStandardPaths::setTestModeEnabled(true);
+
     QApplication app(argc, argv);
     const Options options = parseOptions(QApplication::arguments());
 
     std::printf("=== mc_host_bench 单线程负载实测 ===\n");
     std::printf("平台            : %s\n", qgetenv("QT_QPA_PLATFORM").constData());
-    std::printf("每档时长        : %d s\n", options.seconds);
+    std::printf("时长            : %d s%s\n", options.seconds,
+                options.soak ? "（浸泡）" : "（每档）");
 #ifndef NDEBUG
     std::printf("⚠ 本次是 **未优化构建**（NDEBUG 未定义，默认 Debug）。\n"
                 "  下面这些数字只说明“这条路径在做什么”，不能当作发布版本的性能指标 ——\n"
@@ -314,6 +460,25 @@ int main(int argc, char** argv) {
 #endif
     std::printf("说明            : 绘制由事件循环以独立事件投递，不在 onTick 回调里，\n"
                 "                  故每拍耗时不含绘制；绘制成本由“一次整页绘制”那一项单独给出。\n");
+    std::printf("历史库          : %s（临时目录，跑前清空）\n", benchDbPath().toUtf8().constData());
+    std::printf("                  默认路径 %s 本轮不会被写入\n",
+                mchost::DeviceManager::defaultHistoryPath().toUtf8().constData());
+
+    if (options.soak) {
+        // 浸泡只跑一档：这里问的不是"每拍多贵"，而是"连着跑会不会漂/会不会涨"。
+        // 1 kHz 那档是把设备侧产帧压到极限的压力档，泡一小时只是在反复撞同一个上限，
+        // 得不到新信息；100 Hz 才是产品实际会遇到的负载。
+        const int progress = std::max(1, options.seconds / 60);
+        std::printf("\n★ 浸泡模式：单档 100 Hz，时长 %d s，每 %d s 打一行进度。\n"
+                    "  判读要点：内存与环形缓冲应当**稳定**（缓冲有界、报警有上限），\n"
+                    "  落库行数应当与收帧数同量级，库文件随时间线性增长（那是数据，不是泄漏）。\n",
+                    options.seconds, progress);
+        std::fflush(stdout);
+        const PhaseReport soak =
+            runPhase(QStringLiteral("soak 100 Hz"), 10U, options.seconds, progress);
+        printReport(soak);
+        return 0;
+    }
 
     const PhaseReport baseline = runPhase(QStringLiteral("baseline 100 Hz"), 10U, options.seconds);
     printReport(baseline);

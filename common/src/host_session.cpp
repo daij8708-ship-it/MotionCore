@@ -118,6 +118,19 @@ bool HostSession::sendClearFault(std::uint8_t faultCode, std::uint16_t seq, std:
     return sendCommand(MessageType::ClearFault, seq, encodeClearFault(payload), nowMs);
 }
 
+bool HostSession::sendReadParams(std::uint16_t seq, std::uint64_t nowMs) {
+    // 载荷为空：这条命令不带参数（设备侧对非空载荷以 BadParameter 拒）。
+    return sendCommand(MessageType::ReadParams, seq, {}, nowMs);
+}
+
+bool HostSession::sendHome(const HomeParam& param, std::uint16_t seq, std::uint64_t nowMs) {
+    return sendCommand(MessageType::Home, seq, encodeHomeParam(param), nowMs);
+}
+
+bool HostSession::sendSetLimits(const SoftLimits& limits, std::uint16_t seq, std::uint64_t nowMs) {
+    return sendCommand(MessageType::SetLimits, seq, encodeSoftLimits(limits), nowMs);
+}
+
 bool HostSession::sendStop(std::uint16_t seq) {
     // 单向：不登记、不等待、失败也不重试（ADR-004）。
     return sendFrame(MessageType::Stop, seq, {});
@@ -280,6 +293,24 @@ void HostSession::dispatch(const Frame& frame, PumpResult& result, std::uint64_t
             // 监控器永远拿不到 RTT 样本 → 推荐窗口永不收敛 → 窗口一直太小。
             // 迟到的心跳应答同样携带**真实 RTT**，而它正是把窗口撑开所必需的。
             linkMonitor_->onHeartbeatAck(frame.seq, nowMs);
+        }
+
+        // 参数回读要把**载荷**取出来：应答匹配只说明"对端收到了"，
+        // 而回读的全部意义在于"它存的是什么"。载荷坏了也照实计数 ——
+        // 悄悄当成"没有回读"，会把"设备回了一份坏数据"混淆成"设备没回答"。
+        if (frame.type == MessageType::ReadParamsAck) {
+            ParamState state;
+            if (decodeParamState(frame.payload.data(), frame.payload.size(), state) !=
+                    PayloadError::None ||
+                !isParamStateValid(state)) {
+                ++paramStatesRejected_;
+                ++result.paramStatesRejected;
+            } else {
+                lastParamState_ = state;
+                hasParamState_ = true;
+                ++paramStatesReceived_;
+                ++result.paramStatesReceived;
+            }
         }
         return;
     }

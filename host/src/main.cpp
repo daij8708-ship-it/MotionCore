@@ -19,12 +19,14 @@
 
 #include <QApplication>
 #include <QElapsedTimer>
+#include <QFileInfo>
 #include <QString>
 #include <QStringList>
 #include <QTabWidget>
 #include <QTimer>
 
 #include "mc/device_state.hpp"
+#include "mc/log.hpp"
 #include "mc_host/device.hpp"
 #include "mc_host/device_manager.hpp"
 #include "mc_host/ui/curve_plot.hpp"
@@ -242,9 +244,32 @@ int main(int argc, char** argv) {
 
     const Options options = parseOptions(QApplication::arguments());
 
+    // 运行日志（P1-8）先建：它的生命周期要**长过** manager 与 window
+    // （两者都只持有裸指针）。声明顺序就是销毁顺序的反序，所以放在最前面。
+    // 滚动参数 1 MiB × 3 是"够查一次现场、又不会写满磁盘"的量级；
+    // 落在与历史库**同一个目录**下 —— 出事之后要一起翻的就是这两样东西。
+    mc::RotatingFileWriter logWriter;
+    const QString logPath =
+        QFileInfo(mchost::DeviceManager::defaultHistoryPath()).absolutePath() +
+        QStringLiteral("/mc_host.log");
+    const bool logOpen = logWriter.open(logPath.toStdString(), 1U << 20, 3U);
+
+    mc::Logger logger;
+    logger.attachFile(&logWriter);      // 打不开也挂着：写失败会被计数并显示出来
+    logger.setMinLevel(mc::LogLevel::Info);
+
     mchost::DeviceManager manager;
+    manager.setLogger(&logger);
+
     mchost::MainWindow window(manager);
+    window.attachLogger(&logger);
     window.show();
+
+    logger.info("app", logOpen
+                           ? QStringLiteral("上位机启动，日志写入 %1").arg(logPath).toStdString()
+                           : QStringLiteral("上位机启动，但日志文件打不开（%1）：只留内存")
+                                 .arg(QString::fromStdString(logWriter.lastError()))
+                                 .toStdString());
 
     if (options.selftest) {
         const int code = runSelfTest(options, manager, window);

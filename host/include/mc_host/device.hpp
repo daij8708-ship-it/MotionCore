@@ -152,6 +152,27 @@ public:
     // 物理原因（超速/堵转/接线）必须先由人查清，这条命令只是让设备重新自检。
     virtual bool clearFault(mc::FaultCode code) = 0;
 
+    // 读回设备**存着**的那一组参数（模式 / 目标 / PID 增益 / 软限位）。
+    //
+    // 它不是运动指令，而是一次幂等读，因此超时后允许重传（协议层已这么定）。
+    // 返回值只说明"有没有发出去"；读回来的值在 lastParamState() 里。
+    virtual bool readParams() = 0;
+
+    // 回零：设备以给定速度朝零点走，到位后把那里定义成零点。
+    // 它是**运动指令**（电机会转）：超时按 Fault 处理、不自动重发。
+    // 应答只说明"设备接受了"，到位与否看 deviceState()（Home → Ready/Fault）。
+    virtual bool home(const mc::HomeParam& param) = 0;
+
+    // 下发软限位（位置行程限制）。设备存下来并据此拦，不是一条显示用的设置。
+    virtual bool setLimits(const mc::SoftLimits& limits) = 0;
+
+    // --- 参数回读的观测 ---------------------------------------------------------
+    virtual bool hasParamState() const noexcept = 0;
+    virtual mc::ParamState lastParamState() const noexcept = 0;
+    // 坏数据单独计数：把"设备回了一份坏数据"混同于"设备没回答"，排查方向会整个偏掉。
+    virtual std::uint64_t paramStatesReceivedTotal() const noexcept = 0;
+    virtual std::uint64_t paramStatesRejectedTotal() const noexcept = 0;
+
     // --- 会话与设备状态 ---------------------------------------------------------
     virtual bool sessionReady() const noexcept = 0;
     virtual std::uint64_t handshakeRounds() const noexcept = 0;
@@ -163,6 +184,17 @@ public:
     virtual float velocityDegPerSec() const noexcept = 0;
     virtual float positionDeg() const noexcept = 0;
     virtual float deviceTarget() const noexcept = 0;
+    // **设备说的**"本轮回零已经建立了零点"（遥测状态位组里的那一位，v3 起）。
+    //
+    // 上位机不能自己推这件事：它能看到的只有状态，而"被 STOP 打断的回零"与
+    // "走到位的回零"在状态上可能都表现为 Ready —— 打断那条路径里的 Stopping
+    // 会在两拍之间过去（回零本来就是低速）。所以"零点建立没有"只能读设备报的位。
+    //
+    // 未收到过遥测时返回 false（= "还没有证据"）：这与"设备说没建立"在字面上
+    // 无法区分，是刻意的 —— 调用方该先看 hasTelemetryReceived()，别把"没收到"
+    // 当成一条结论。
+    virtual bool homingAttained() const noexcept = 0;
+    virtual bool hasTelemetryReceived() const noexcept = 0;
 
     // --- 链路 -------------------------------------------------------------------
     virtual bool linkDown() const noexcept = 0;
@@ -223,6 +255,9 @@ public:
     bool setTarget(float target) override;
     bool setPid(const mc::SetPid& pid) override;
     bool clearFault(mc::FaultCode code) override;
+    bool readParams() override;
+    bool home(const mc::HomeParam& param) override;
+    bool setLimits(const mc::SoftLimits& limits) override;
 
     bool sessionReady() const noexcept override;
     std::uint64_t handshakeRounds() const noexcept override;
@@ -234,6 +269,8 @@ public:
     float velocityDegPerSec() const noexcept override;
     float positionDeg() const noexcept override;
     float deviceTarget() const noexcept override;
+    bool homingAttained() const noexcept override;
+    bool hasTelemetryReceived() const noexcept override;
 
     bool linkDown() const noexcept override;
     std::uint64_t ackTimeoutMs() const noexcept override;
@@ -246,6 +283,10 @@ public:
     std::uint64_t hostSendFailures() const noexcept override;
     std::uint64_t telemetryAcceptedTotal() const noexcept override;
     std::uint64_t telemetryRejectedTotal() const noexcept override;
+    bool hasParamState() const noexcept override;
+    mc::ParamState lastParamState() const noexcept override;
+    std::uint64_t paramStatesReceivedTotal() const noexcept override;
+    std::uint64_t paramStatesRejectedTotal() const noexcept override;
     const mc::StreamDecoder::Stats& decoderStats() const noexcept override;
     const mc::AckStats& ackStats() const noexcept override;
 
@@ -328,6 +369,9 @@ public:
     bool setTarget(float target) override;
     bool setPid(const mc::SetPid& pid) override;
     bool clearFault(mc::FaultCode code) override;
+    bool readParams() override;
+    bool home(const mc::HomeParam& param) override;
+    bool setLimits(const mc::SoftLimits& limits) override;
 
     bool sessionReady() const noexcept override;
     std::uint64_t handshakeRounds() const noexcept override;
@@ -339,6 +383,8 @@ public:
     float velocityDegPerSec() const noexcept override;
     float positionDeg() const noexcept override;
     float deviceTarget() const noexcept override;
+    bool homingAttained() const noexcept override;
+    bool hasTelemetryReceived() const noexcept override;
 
     bool linkDown() const noexcept override;
     std::uint64_t ackTimeoutMs() const noexcept override;
@@ -351,6 +397,10 @@ public:
     std::uint64_t hostSendFailures() const noexcept override;
     std::uint64_t telemetryAcceptedTotal() const noexcept override;
     std::uint64_t telemetryRejectedTotal() const noexcept override;
+    bool hasParamState() const noexcept override;
+    mc::ParamState lastParamState() const noexcept override;
+    std::uint64_t paramStatesReceivedTotal() const noexcept override;
+    std::uint64_t paramStatesRejectedTotal() const noexcept override;
     const mc::StreamDecoder::Stats& decoderStats() const noexcept override;
     const mc::AckStats& ackStats() const noexcept override;
 

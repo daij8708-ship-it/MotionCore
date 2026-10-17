@@ -8,6 +8,8 @@
 #include <QSqlDatabase>
 #include <QString>
 
+#include "mc/alarm.hpp"
+
 #include "mc_host/telemetry_ring.hpp"
 
 namespace mchost {
@@ -57,11 +59,30 @@ public:
 
     void addSample(const TelemetrySample& sample);
     void addEvent(std::uint64_t tMs, qint64 wallMs, const QString& text);
+    // 报警落库。**与内存里那本报警簿同一套去重语义**：同一个 (会话, 代码, 首次墙上时刻)
+    // 只有一行，重复出现只把次数与"最近一次"往前推。
+    //
+    // 为什么键里要有"首次墙上时刻"：清单可以被人工清空（那只擦屏幕），清空之后
+    // 同一个码再报一次是**另一起**事件。只用 (会话, 代码) 做键的话，新事件会把
+    // 上一行的次数覆盖掉 —— 那等于"点一下清屏就把库里的历史抹了"。
+    //
+    // 它**强制落盘**（与 addEvent 同理）：报警是事后追查的起点，不能跟样本一起
+    // 悬在内存里等着掉电丢掉。
+    void upsertAlarm(const mc::AlarmEntry& entry);
     // 命令记录是**可以变的**（等待应答 → 已确认/被拒/超时），所以按
     // (session_id, seq) 做 UPSERT：同一条命令的状态更新落在同一行上，
     // 不会出现"一条命令两条记录、一条还在等应答"。
     void upsertCommand(std::uint64_t sentMs, std::uint16_t seq, const QString& name,
                        int status, int nackReason);
+
+    // 操作审计。**与上面几条的关键区别：不要求会话开着。**
+    // 改数据源、切角色、被会话未就绪拦下的命令 —— 这些恰恰发生在"没有会话"的时候，
+    // 而它们正是最需要留痕的事。session_id 记 0 表示当时没有会话。
+    //
+    // 追加写，不做 UPSERT：审计是**发生过的事**，同一条被改掉就不再是审计了。
+    // 同样强制落盘（与 addEvent 同理）。
+    void addAudit(std::uint64_t elapsedMs, qint64 wallMs, int role, int action,
+                  const QString& subject, bool dispatched, const QString& reason);
 
     // 把攒着的样本落盘（不足一批也会写）。断开前应当调用一次。
     void flush();
@@ -100,12 +121,40 @@ public:
         QString text;
     };
 
+    // 库里的一行报警。字段与 mc::AlarmEntry 一一对应，但**刻意不复用它**：
+    // 那一侧是"内存里此刻挂着的状态"，这一侧是"库里记下来的历史事实"，
+    // 两边的字段将来未必同步增长（比如库里还要存会话号）。
+    struct AlarmRow {
+        int code = 0;
+        int level = 0;
+        qint64 firstTMs = 0;
+        qint64 lastTMs = 0;
+        qint64 firstWallMs = 0;
+        qint64 lastWallMs = 0;
+        int occurrences = 0;
+        bool acknowledged = false;
+        qint64 ackWallMs = 0;
+        bool active = true;
+        QString detail;
+    };
+
     struct CommandRow {
         qint64 sentMs = 0;
         int seq = 0;
         QString name;
         int status = 0;
         int nackReason = 0;
+    };
+
+    // 库里的一行审计。字段与 mc::AuditEntry 一一对应（同样刻意不复用）。
+    // elapsedMs 不进这张结构体：界面上要看的是"几点几分"，而那是墙上时钟。
+    struct AuditRow {
+        qint64 wallMs = 0;
+        int role = 0;
+        int action = 0;
+        QString subject;
+        bool dispatched = false;
+        QString reason;
     };
 
     // --- 查询（历史页用）--------------------------------------------------------
@@ -116,7 +165,15 @@ public:
     std::vector<SampleRow> samples(qint64 sessionId, qint64 fromTMs, qint64 toTMs, int limit,
                                    QString& error);
     std::vector<EventRow> events(qint64 sessionId, QString& error);
+    // 某一次会话里落过的报警。按首次墙上时刻排序（时间的顺序），
+    // 不按严重程度排 —— 这是**流水**，不是待办清单。
+    std::vector<AlarmRow> alarms(qint64 sessionId, QString& error);
     std::vector<CommandRow> commands(qint64 sessionId, QString& error);
+    // 审计流水。**不按会话筛**：审计要回答的是"这台机器上发生过什么"，
+    // 而"当时有没有会话"是其中一列信息，不是分类依据。
+    // limit = 0 表示不设上限（历史页/导出用），界面上给一个上限是为了
+    // 不让一张表无限长 —— 表能滚，但没人会翻到一万行之前。
+    std::vector<AuditRow> audits(int limit, QString& error);
     qint64 countSamples(qint64 sessionId, qint64 fromTMs, qint64 toTMs, QString& error);
     // 库里的总样本数（不挑会话），给界面显示"这个文件里到底有多少数据"。
     qint64 totalSamples(QString& error);

@@ -1,5 +1,6 @@
 #include "mc_host/ui/param_page.hpp"
 
+#include <QCheckBox>
 #include <QDoubleSpinBox>
 #include <QFont>
 #include <QGridLayout>
@@ -24,6 +25,18 @@ QString formatTime(double tMs) {
     return QStringLiteral("%1 s").arg(tMs / 1000.0, 0, 'f', 2);
 }
 
+// 软限位在界面上的说法只有两种：一组区间，或者"未启用"。
+// **不给"关掉但留着旧数值"的第三种写法**：关掉就是关掉，设备一条都不看，
+// 而界面上多一个"好像还设着什么"的显示只会让人以为它在起作用。
+QString limitsText(const mc::SoftLimits& limits) {
+    if (!limits.enabled) {
+        return QStringLiteral("未启用（设备在这条上一律放行）");
+    }
+    return QStringLiteral("启用：[%1, %2] deg")
+        .arg(limits.minDeg, 0, 'f', 1)
+        .arg(limits.maxDeg, 0, 'f', 1);
+}
+
 }  // namespace
 
 ParamPage::ParamPage(DeviceManager& manager, QWidget* parent)
@@ -32,11 +45,11 @@ ParamPage::ParamPage(DeviceManager& manager, QWidget* parent)
 
     auto* intro = new QLabel(
         QStringLiteral(
-            "这一页是 PID 的**唯一可写入口**：同一个参数有两个写入口，迟早会出现"
-            "“两处显示的值不一样、不知道该信哪个”。\n"
-            "⚠️ 下面那张表是**下发记录**，不是设备的回读值 —— 协议 v1 里没有“读参数”的消息，"
-            "遥测帧也不带 PID，所以“设备现在实际用的是多少”在协议层面答不出来。"
-            "要知道它有没有生效，看的是“结果”列：对端确认了才算落地。"),
+            "这一页是 PID 与软限位的**唯一可写入口**：同一个参数有两个写入口，"
+            "迟早会出现“两处显示的值不一样、不知道该信哪个”。\n"
+            "⚠️ 下面的“下发记录”是**上位机发出去的东西**，不是设备的实存值。"
+            "要回答“设备现在到底用的是哪一组”，只有按下回读、看设备回过来的那一段 —— "
+            "协议里的 READ_PARAMS 就是为这一问存在的。"),
         this);
     intro->setWordWrap(true);
     intro->setStyleSheet(QStringLiteral("color:#444;"));
@@ -78,6 +91,72 @@ ParamPage::ParamPage(DeviceManager& manager, QWidget* parent)
     limitHint->setStyleSheet(QStringLiteral("color:#666;"));
     root->addWidget(limitHint);
 
+    // --- 软限位（SET_LIMITS）---------------------------------------------------
+    //
+    // 写在这一页而不是运动页：软限位是**设备侧的约束参数**，与增益同属"配置"，
+    // 而"现在往哪走"才是运动页的事。
+    auto* limitsGroup = new QGroupBox(
+        QStringLiteral("软限位（SET_LIMITS —— 位置行程限制，定义的是“哪里算越界”）"), this);
+    auto* limitsRow = new QHBoxLayout(limitsGroup);
+    limitEnabledCheck_ = new QCheckBox(QStringLiteral("启用"), this);
+    limitEnabledCheck_->setObjectName(QStringLiteral("limitsEnabledCheck"));
+    limitsRow->addWidget(limitEnabledCheck_);
+    limitsRow->addWidget(new QLabel(QStringLiteral("最小"), this));
+    limitMinSpin_ = new QDoubleSpinBox(this);
+    limitMinSpin_->setObjectName(QStringLiteral("limitsMinSpin"));
+    limitMinSpin_->setRange(-100000.0, 100000.0);
+    limitMinSpin_->setDecimals(1);
+    limitMinSpin_->setSingleStep(30.0);
+    limitMinSpin_->setValue(-180.0);
+    limitsRow->addWidget(limitMinSpin_);
+    limitsRow->addWidget(new QLabel(QStringLiteral("deg   最大"), this));
+    limitMaxSpin_ = new QDoubleSpinBox(this);
+    limitMaxSpin_->setObjectName(QStringLiteral("limitsMaxSpin"));
+    limitMaxSpin_->setRange(-100000.0, 100000.0);
+    limitMaxSpin_->setDecimals(1);
+    limitMaxSpin_->setSingleStep(30.0);
+    limitMaxSpin_->setValue(180.0);
+    limitsRow->addWidget(limitMaxSpin_);
+    limitsRow->addWidget(new QLabel(QStringLiteral("deg"), this));
+    applyLimitsButton_ = new QPushButton(QStringLiteral("下发软限位"), this);
+    applyLimitsButton_->setObjectName(QStringLiteral("applyLimitsButton"));
+    limitsRow->addWidget(applyLimitsButton_);
+    limitsRow->addStretch(1);
+    root->addWidget(limitsGroup);
+
+    auto* limitsNote = new QLabel(
+        QStringLiteral(
+            "“启用”是关键：关掉时两个数值**不参与任何判定**，设备一条都不看。\n"
+            "设备是执法方（它才是那个能让电机停下的），所以它还会多判一层："
+            "新限位若把**当前位置**或**当前目标**关在门外，报文会以“参数不合法”被拒 —— "
+            "那种限位设下去等于下一拍就报超限故障。"),
+        this);
+    limitsNote->setWordWrap(true);
+    limitsNote->setStyleSheet(QStringLiteral("color:#666;"));
+    root->addWidget(limitsNote);
+
+    limitsResultLabel_ = new QLabel(QStringLiteral("尚未下发过软限位"), this);
+    limitsResultLabel_->setObjectName(QStringLiteral("limitsResultLabel"));
+    limitsResultLabel_->setWordWrap(true);
+    root->addWidget(limitsResultLabel_);
+
+    // --- 回读设备实存参数（READ_PARAMS）----------------------------------------
+    auto* readbackGroup =
+        new QGroupBox(QStringLiteral("回读设备实存参数（READ_PARAMS —— 设备回的是什么就是什么）"),
+                      this);
+    auto* readbackLayout = new QVBoxLayout(readbackGroup);
+    auto* readbackRow = new QHBoxLayout();
+    readbackButton_ = new QPushButton(QStringLiteral("回读一次"), this);
+    readbackButton_->setObjectName(QStringLiteral("readbackButton"));
+    readbackRow->addWidget(readbackButton_);
+    readbackRow->addStretch(1);
+    readbackLayout->addLayout(readbackRow);
+    readbackLabel_ = new QLabel(this);
+    readbackLabel_->setObjectName(QStringLiteral("readbackLabel"));
+    readbackLabel_->setWordWrap(true);
+    readbackLayout->addWidget(readbackLabel_);
+    root->addWidget(readbackGroup);
+
     resultLabel_ = new QLabel(QStringLiteral("尚未下发过 PID"), this);
     resultLabel_->setObjectName(QStringLiteral("pidResultLabel"));
     QFont resultFont = resultLabel_->font();
@@ -97,12 +176,59 @@ ParamPage::ParamPage(DeviceManager& manager, QWidget* parent)
     root->addWidget(logTable_, 1);
 
     connect(applyButton_, &QPushButton::clicked, this, &ParamPage::applyPid);
+    connect(applyLimitsButton_, &QPushButton::clicked, this, &ParamPage::applyLimits);
+    connect(readbackButton_, &QPushButton::clicked, this, [this]() {
+        if (!manager_.requestParamReadback()) {
+            limitsResultLabel_->setText(manager_.lastRefusalText());
+            return;
+        }
+        limitsResultLabel_->setText(
+            QStringLiteral("已请求回读（READ_PARAMS），等设备回话…"));
+    });
+    // 回读值是**异步**到达的：命令发出去与设备回话之间隔着几拍，
+    // 所以这里跟着 20 Hz 那条刷新走，而不是发完就读（那时读到的还是上一次的结果）。
+    connect(&manager_, &DeviceManager::statsRefreshed, this, &ParamPage::refreshReadback);
     connect(&manager_, &DeviceManager::connectionChanged, this, &ParamPage::onConnectionChanged);
     connect(&manager_, &DeviceManager::commandLogChanged, this, &ParamPage::refreshLog);
     connect(&manager_, &DeviceManager::statsRefreshed, this, &ParamPage::refresh);
 
     onConnectionChanged(manager_.isConnected());
     refreshLog();
+    refreshReadback();
+}
+
+void ParamPage::applyLimits() {
+    mc::SoftLimits limits;
+    limits.enabled = limitEnabledCheck_->isChecked();
+    limits.minDeg = static_cast<float>(limitMinSpin_->value());
+    limits.maxDeg = static_cast<float>(limitMaxSpin_->value());
+
+    if (!manager_.sendSoftLimits(limits)) {
+        limitsResultLabel_->setText(manager_.lastRefusalText());
+        return;
+    }
+    limitsResultLabel_->setText(QStringLiteral("已下发 SET_LIMITS（%1），等结果…")
+                                    .arg(limitsText(limits)));
+}
+
+void ParamPage::refreshReadback() {
+    mc::ParamState state;
+    if (!manager_.deviceParamState(state)) {
+        readbackLabel_->setText(
+            QStringLiteral("还没回读过 —— 这一段是空的，因为**设备没有说过**它现在存的是什么。"
+                           "上面输入框里的数字是我发出去的，不是它存着的。"));
+        readbackLabel_->setStyleSheet(QStringLiteral("color:#8a5a00;"));
+        return;
+    }
+
+    readbackLabel_->setText(QStringLiteral("设备侧实存：模式 %1、目标 %2、Kp %3、Ki %4、Kd %5\n软限位：%6")
+                                .arg(static_cast<int>(state.mode))
+                                .arg(static_cast<double>(state.target), 0, 'f', 3)
+                                .arg(static_cast<double>(state.kp), 0, 'f', 4)
+                                .arg(static_cast<double>(state.ki), 0, 'f', 4)
+                                .arg(static_cast<double>(state.kd), 0, 'f', 4)
+                                .arg(limitsText(state.limits)));
+    readbackLabel_->setStyleSheet(QStringLiteral("color:#1b5e20;"));
 }
 
 void ParamPage::applyPid() {
@@ -111,9 +237,10 @@ void ParamPage::applyPid() {
     const double kd = kdSpin_->value();
 
     if (!manager_.sendSetPid(kp, ki, kd)) {
-        // 返回 false = 本地就没发出去（会话未就绪）。这不是"设备拒绝了"，
-        // 两者混为一谈会把排查方向指错。
-        resultLabel_->setText(QStringLiteral("没有发出去：会话未就绪（命令行里会留下一条“未发出”）"));
+        // 返回 false 有两种来路：没权限，或本地就没发出去（会话未就绪 / 没连上）。
+        // 两者混为一谈会把排查方向指错，所以显示的是**管理层给的原话** ——
+        // 它已经分好了类（见 DeviceManager::lastRefusalText）。
+        resultLabel_->setText(manager_.lastRefusalText());
         return;
     }
 
@@ -144,6 +271,11 @@ void ParamPage::onConnectionChanged(bool connected) {
     kpSpin_->setEnabled(ready);
     kiSpin_->setEnabled(ready);
     kdSpin_->setEnabled(ready);
+    applyLimitsButton_->setEnabled(ready);
+    limitEnabledCheck_->setEnabled(ready);
+    limitMinSpin_->setEnabled(ready);
+    limitMaxSpin_->setEnabled(ready);
+    readbackButton_->setEnabled(ready);
     refresh();
 }
 

@@ -87,6 +87,8 @@ public:
         std::size_t framesDecoded = 0;
         std::size_t telemetryAccepted = 0;
         std::size_t telemetryRejected = 0;   // 结构或语义非法，已丢弃，未进入数据通路
+        std::size_t paramStatesReceived = 0;   // 本拍收到的参数回读（结构与语义都通过）
+        std::size_t paramStatesRejected = 0;   // 本拍收到的参数回读里被判成坏数据的
         std::size_t acksMatched = 0;
         std::size_t naksReceived = 0;
         std::size_t unexpectedFrames = 0;    // 陈旧 ACK / 无人认领的 NAK / 意外类型
@@ -119,6 +121,16 @@ public:
     // faultCode 是操作员**确认的**那个码，不是"清一切"（见 ClearFault 的说明）。
     bool sendClearFault(std::uint8_t faultCode, std::uint16_t seq, std::uint64_t nowMs);
 
+    // 读回设备存着的参数组。载荷为空；应答（READ_PARAMS_ACK）带 ParamState。
+    bool sendReadParams(std::uint16_t seq, std::uint64_t nowMs);
+
+    // 回零。应答只表示"设备接受了、开始走了"，到位与否由状态报（Homing → Ready）。
+    // 它是运动指令：超时按 Fault 处理，**不自动重发**（协议层已这么定）。
+    bool sendHome(const HomeParam& param, std::uint16_t seq, std::uint64_t nowMs);
+
+    // 下发软限位。幂等，超时后允许重传（与 SET_PID 同族）。
+    bool sendSetLimits(const SoftLimits& limits, std::uint16_t seq, std::uint64_t nowMs);
+
     // STOP 是单向的（ADR-004）：不等应答，因此不需要 nowMs。
     bool sendStop(std::uint16_t seq);
 
@@ -132,6 +144,13 @@ public:
     std::uint64_t telemetryAccepted() const noexcept { return telemetryAccepted_; }
     std::uint64_t telemetryRejected() const noexcept { return telemetryRejected_; }
     const std::vector<Nack>& receivedNacks() const noexcept { return receivedNacks_; }
+
+    // 最近一次**通过校验**的参数回读，以及累计条数。
+    // 坏数据单独计数：把"设备回了一份坏数据"混同于"设备没回答"，会让排查方向整个偏掉。
+    bool hasParamState() const noexcept { return hasParamState_; }
+    const ParamState& lastParamState() const noexcept { return lastParamState_; }
+    std::uint64_t paramStatesReceived() const noexcept { return paramStatesReceived_; }
+    std::uint64_t paramStatesRejected() const noexcept { return paramStatesRejected_; }
 
     const AckTracker& tracker() const noexcept { return tracker_; }
     const StreamDecoder& decoder() const noexcept { return decoder_; }
@@ -177,6 +196,10 @@ private:
 
     Telemetry lastTelemetry_{};
     bool hasTelemetry_ = false;
+    ParamState lastParamState_{};
+    bool hasParamState_ = false;
+    std::uint64_t paramStatesReceived_ = 0U;
+    std::uint64_t paramStatesRejected_ = 0U;
     std::vector<Nack> receivedNacks_;
 
     std::uint64_t telemetryAccepted_ = 0U;

@@ -29,15 +29,19 @@ enum class DeviceState : std::uint8_t {
     Ready        = 2U,   // 握手完成、参数一致，输出未使能
     Running      = 3U,   // 已使能，按 target 运动
     Stopping     = 4U,   // 收到 STOP，正把速度收到零
-    Fault        = 5U,   // 有故障：只允许 STOP / HEARTBEAT / HELLO / CLEAR_FAULT
+    Fault        = 5U,   // 有故障：只允许 STOP / HEARTBEAT / HELLO / READ_PARAMS / CLEAR_FAULT
     Recovery     = 6U,   // 人工确认后的中间态，恢复校验通过才回 Ready
+    // 回零中（P1-6）。它与 Running 是**两回事**：都在让电机转，但回零
+    // 不接受任何目标值（目标是"零点"，一个由设备定义的地方），也不接受改模式。
+    // 把它并进 Running 会让"现在这个运动是不是操作员要的那个"说不清。
+    Home         = 7U,
 };
 
-inline constexpr std::uint8_t kDeviceStateCount = 7U;
+inline constexpr std::uint8_t kDeviceStateCount = 8U;
 
-// 遥测帧的 state 字段直接发这个枚举的编号（0..6）。两端必须一致，
+// 遥测帧的 state 字段直接发这个枚举的编号（0..7）。两端必须一致，
 // 因此这张映射表由 DeviceState.WireValuesMatchSpec 用例钉住 ——
-// 不靠"反正都是连着的 0..6"心算。
+// 不靠"反正都是连着的 0..7"心算。
 const char* deviceStateName(DeviceState state) noexcept;
 
 enum class DeviceEvent : std::uint8_t {
@@ -51,9 +55,11 @@ enum class DeviceEvent : std::uint8_t {
     FaultRaised,           // 产生故障（超速 / 超限位 / CRC 连错 / 设备侧通信丢失）
     RecoveryConfirmed,     // 人工确认
     RecoveryOk,            // 恢复校验通过
+    HomeAccepted,          // 回零被门禁放行，设备开始朝零点走
+    HomeCompleted,         // 到位并把那里定义成零点
 };
 
-inline constexpr std::uint8_t kDeviceEventCount = 10U;
+inline constexpr std::uint8_t kDeviceEventCount = 12U;
 
 const char* deviceEventName(DeviceEvent event) noexcept;
 
@@ -65,6 +71,7 @@ enum class FaultCode : std::uint8_t {
     OverLimit = 3U,
     CrcBurst = 4U,
     Forced = 5U,              // 仅供测试注入
+    HomeFailed = 6U,          // 回零超时/走不到零点（P1-6）
 };
 
 const char* faultCodeName(FaultCode code) noexcept;
@@ -83,7 +90,7 @@ struct TransitionResult {
     bool faultLatchedAfter = false;   // 事件之后故障锁存位的值
 };
 
-// 门禁表的唯一真源。做成自由函数是为了能被"对 7×7 全表逐格断言"的用例直接调用。
+// 门禁表的唯一真源。做成自由函数是为了能被"对 8×10 全表逐格断言"的用例直接调用。
 CommandVerdict commandVerdict(DeviceState state, MessageType type) noexcept;
 
 class DeviceStateMachine {
@@ -105,7 +112,7 @@ public:
     TransitionResult apply(DeviceEvent event) noexcept;
 
     // 只读查询：给定起点与锁存位，施加事件会得到什么。不改本机状态、不计数。
-    // 供穷举用例把 (7 状态 × 2 锁存位 × 10 事件) 全表逐格对照规格 ——
+    // 供穷举用例把 (8 状态 × 2 锁存位 × 12 事件) 全表逐格对照规格 ——
     // 这些组合里有相当一部分（例如 Running 且带故障锁存）在实际中不可达，
     // 但"不可达"是运行时性质，不能拿它当不测的理由。
     TransitionResult simulate(DeviceState from, bool faultLatched,

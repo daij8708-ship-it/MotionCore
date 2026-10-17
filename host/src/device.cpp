@@ -270,6 +270,31 @@ bool SimulatedDevice::setPid(const mc::SetPid& pid) {
     return recordCommand("SET_PID", seq, link_->host->sendSetPid(pid, seq, lastTickMs_));
 }
 
+bool SimulatedDevice::readParams() {
+    if (link_ == nullptr || !link_->host->sessionReady()) {
+        return recordCommand("READ_PARAMS", 0U, false);
+    }
+    const std::uint16_t seq = link_->seq++;
+    return recordCommand("READ_PARAMS", seq, link_->host->sendReadParams(seq, lastTickMs_));
+}
+
+bool SimulatedDevice::home(const mc::HomeParam& param) {
+    // 与其余运动命令同一档：会话未就绪就不发（此时命令到不了设备）。
+    if (link_ == nullptr || !link_->host->sessionReady()) {
+        return recordCommand("HOME", 0U, false);
+    }
+    const std::uint16_t seq = link_->seq++;
+    return recordCommand("HOME", seq, link_->host->sendHome(param, seq, lastTickMs_));
+}
+
+bool SimulatedDevice::setLimits(const mc::SoftLimits& limits) {
+    if (link_ == nullptr || !link_->host->sessionReady()) {
+        return recordCommand("SET_LIMITS", 0U, false);
+    }
+    const std::uint16_t seq = link_->seq++;
+    return recordCommand("SET_LIMITS", seq, link_->host->sendSetLimits(limits, seq, lastTickMs_));
+}
+
 bool SimulatedDevice::clearFault(mc::FaultCode code) {
     // 会话未就绪就不发。局部条件比设备门禁更严一档是**故意**的：故障锁存期间
     // 链路一旦断了（重连会被直接带回 Fault），此时发出去的确认连门禁都到不了，
@@ -325,6 +350,16 @@ float SimulatedDevice::deviceTarget() const noexcept {
     return (link_ != nullptr) ? link_->sim.target() : 0.0F;
 }
 
+// 进程内模拟器：这一位直接问设备（它就在同一个进程里）。
+// 真链路上它来自遥测帧的 statusFlags —— 见下面的 SerialDevice 版本。
+bool SimulatedDevice::homingAttained() const noexcept {
+    return link_ != nullptr && link_->sim.homingAttained();
+}
+
+bool SimulatedDevice::hasTelemetryReceived() const noexcept {
+    return link_ != nullptr && link_->host->telemetryAccepted() > 0U;
+}
+
 bool SimulatedDevice::linkDown() const noexcept {
     return link_ != nullptr && link_->host->linkMonitor() != nullptr &&
            link_->host->linkMonitor()->linkDown();
@@ -372,6 +407,22 @@ std::uint64_t SimulatedDevice::telemetryAcceptedTotal() const noexcept {
 
 std::uint64_t SimulatedDevice::telemetryRejectedTotal() const noexcept {
     return (link_ != nullptr) ? link_->host->telemetryRejected() : 0U;
+}
+
+bool SimulatedDevice::hasParamState() const noexcept {
+    return link_ != nullptr && link_->host->hasParamState();
+}
+
+mc::ParamState SimulatedDevice::lastParamState() const noexcept {
+    return (link_ != nullptr) ? link_->host->lastParamState() : mc::ParamState{};
+}
+
+std::uint64_t SimulatedDevice::paramStatesReceivedTotal() const noexcept {
+    return (link_ != nullptr) ? link_->host->paramStatesReceived() : 0U;
+}
+
+std::uint64_t SimulatedDevice::paramStatesRejectedTotal() const noexcept {
+    return (link_ != nullptr) ? link_->host->paramStatesRejected() : 0U;
 }
 
 const mc::StreamDecoder::Stats& SimulatedDevice::decoderStats() const noexcept {
@@ -633,6 +684,30 @@ bool SerialDevice::clearFault(mc::FaultCode code) {
         host_->sendClearFault(static_cast<std::uint8_t>(code), seq, lastTickMs_));
 }
 
+bool SerialDevice::readParams() {
+    if (host_ == nullptr || !host_->sessionReady()) {
+        return recordCommand("READ_PARAMS", 0U, false);
+    }
+    const std::uint16_t seq = seq_++;
+    return recordCommand("READ_PARAMS", seq, host_->sendReadParams(seq, lastTickMs_));
+}
+
+bool SerialDevice::home(const mc::HomeParam& param) {
+    if (host_ == nullptr || !host_->sessionReady()) {
+        return recordCommand("HOME", 0U, false);
+    }
+    const std::uint16_t seq = seq_++;
+    return recordCommand("HOME", seq, host_->sendHome(param, seq, lastTickMs_));
+}
+
+bool SerialDevice::setLimits(const mc::SoftLimits& limits) {
+    if (host_ == nullptr || !host_->sessionReady()) {
+        return recordCommand("SET_LIMITS", 0U, false);
+    }
+    const std::uint16_t seq = seq_++;
+    return recordCommand("SET_LIMITS", seq, host_->sendSetLimits(limits, seq, lastTickMs_));
+}
+
 CommandRecord* SerialDevice::findAwaiting(std::uint16_t seq) {
     for (CommandRecord& record : log_) {
         if (record.seq == seq && record.status == CommandStatus::Awaiting) {
@@ -743,6 +818,17 @@ float SerialDevice::velocityDegPerSec() const noexcept { return lastTelemetry_.v
 float SerialDevice::positionDeg() const noexcept { return lastTelemetry_.positionDeg; }
 float SerialDevice::deviceTarget() const noexcept { return lastTelemetry_.target; }
 
+// 这一位**只能**从设备报的遥测里来（v3 起的状态位组）。上位机没有别的路能知道
+// "这一轮回零有没有建立零点"：被 STOP 打断的那条路径可以在两拍之间从 Stopping
+// 回到 Ready（见 payload.hpp 的说明），状态采不到。
+bool SerialDevice::homingAttained() const noexcept {
+    return (lastTelemetry_.statusFlags & mc::kTelemetryFlagHomingAttained) != 0U;
+}
+
+bool SerialDevice::hasTelemetryReceived() const noexcept {
+    return host_ != nullptr && host_->telemetryAccepted() > 0U;
+}
+
 bool SerialDevice::linkDown() const noexcept {
     return host_ != nullptr && host_->linkMonitor() != nullptr && host_->linkMonitor()->linkDown();
 }
@@ -787,6 +873,22 @@ std::uint64_t SerialDevice::telemetryAcceptedTotal() const noexcept {
 
 std::uint64_t SerialDevice::telemetryRejectedTotal() const noexcept {
     return (host_ != nullptr) ? host_->telemetryRejected() : 0U;
+}
+
+bool SerialDevice::hasParamState() const noexcept {
+    return host_ != nullptr && host_->hasParamState();
+}
+
+mc::ParamState SerialDevice::lastParamState() const noexcept {
+    return (host_ != nullptr) ? host_->lastParamState() : mc::ParamState{};
+}
+
+std::uint64_t SerialDevice::paramStatesReceivedTotal() const noexcept {
+    return (host_ != nullptr) ? host_->paramStatesReceived() : 0U;
+}
+
+std::uint64_t SerialDevice::paramStatesRejectedTotal() const noexcept {
+    return (host_ != nullptr) ? host_->paramStatesRejected() : 0U;
 }
 
 const mc::StreamDecoder::Stats& SerialDevice::decoderStats() const noexcept {

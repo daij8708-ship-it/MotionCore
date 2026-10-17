@@ -22,7 +22,18 @@ namespace mc {
 inline constexpr std::uint8_t kSof0 = 0xAAU;
 inline constexpr std::uint8_t kSof1 = 0x55U;
 
-inline constexpr std::uint8_t kProtocolVersion = 0x01U;
+// 协议版本。两端必须一致（不一致的帧按 UnsupportedVersion 拒）。
+//
+//   v1 → v2（P1-6）：PARAM_STATE 载荷增加了**软限位**一组字段（1 + 4 + 4 字节）。
+//   v2 → v3（P1-6）：TELEMETRY 载荷增加 1 字节**状态位组**（目前只有
+//        "本轮回零是否已建立零点"，见 payload.hpp 的 kTelemetryFlagHomingAttained）。
+//
+//   为什么走版本号而不是"两个字段凑合用"：这两个载荷都是定长，加字段就是改线格式；
+//   而改线格式却不动版本号，等于让"版本号"这个字段从此不再表示任何东西 ——
+//   下次真需要它挡一次不兼容时，就没有防线了。
+//   遥测这一条的后果尤其直接：旧上位机收到长度不对的遥测，最"宽容"的做法是
+//   猜着解析，而它猜出来的会是一条假的曲线。
+inline constexpr std::uint8_t kProtocolVersion = 0x03U;
 
 inline constexpr std::uint16_t kMaxPayloadSize = 1024U;
 
@@ -99,6 +110,32 @@ enum class MessageType : std::uint8_t {
     // 这一下就会把操作员**没看见**的那个故障悄悄清掉。
     ClearFault = 0x15U,
 
+    // 读回设备**存着**的参数组（模式 / 目标 / 三个 PID 增益）。
+    //
+    // 为什么需要它：SET_* 的应答只说明"设备收到并通过了校验"，不说明"它存下来
+    // 的就是我们要的那个数"。配方下装是"照一份存档的参数去配置设备"，配置完
+    // 不核对一遍，就只剩"我相信它"这一种说法。
+    //
+    // 注意它与遥测里的 target **不是一回事**：遥测报的是"此刻在追什么"
+    // （非 Running 时恒为 0，因为那时设备确实没在追任何值），而本条报的是
+    // "被设成了多少"。两者在 Ready 下必然不同，正是这个差别让回读有意义。
+    ReadParams = 0x16U,
+
+    // 回零：设备以**给定的低速**朝零点走，到位之后把那里**定义成**零点。
+    //
+    // 为什么它必须在设备侧完成、而不是上位机用 SET_MODE + SET_TARGET + START 拼出来：
+    // "零点"是设备坐标系的定义，它是设备侧的知识（行程开关在哪、编码器 Z 相在哪）。
+    // 上位机拼出来的只是"走去 0 度"，而如果此刻的坐标系本来就是错的，
+    // 那等于朝一个错误的原点走 —— 拼出来的回零看起来一模一样，含义完全不同。
+    //
+    // 载荷带速度与超时（见 payload.hpp 的 HomeParam）：回零速度是**每台机器**
+    // 的事，写死在协议里等于替现场做决定。
+    Home = 0x17U,
+
+    // 软限位（位置行程限制）。设备**存下来并据此拦**，不是一条显示用的设置：
+    // 上位机可以因为"它以为是这个值"而少发一条命令，但真正拦住电机的必须是设备。
+    SetLimits = 0x18U,
+
     Telemetry = 0x20U,   // 周期上报：无 ACK，允许丢帧
     FaultEvent = 0x21U,
     Nack = 0x7FU,
@@ -110,6 +147,17 @@ enum class MessageType : std::uint8_t {
     SetTargetAck = 0x93U,
     SetPidAck = 0x94U,
     ClearFaultAck = 0x95U,
+    // 应答携带**设备侧的实存值**（载荷见 payload.hpp 的 ParamState）。
+    ReadParamsAck = 0x96U,
+    // 应答只表示"回零**开始了**"：到位与否由**遥测里的
+    // 「本轮回零是否已建立零点」位**报（见 payload.hpp 的 kTelemetryFlagHomingAttained），
+    // 与 START 同一套分层（命令的结果是"接受了"，行为的结局在状态与状态位里）。
+    //
+    // ⚠️ 单看设备状态是**判不出来**的：被 STOP 打断的回零是 Home → Stopping → Ready，
+    // 而回零本来是低速，那一拍的 |v| 常常已经在停机门限之内 —— Stopping 会在同一拍里
+    // 过去，上位机采不到。所以"零点建立没有"这件事必须由设备用一个**持续**的位来说。
+    HomeAck = 0x97U,
+    SetLimitsAck = 0x98U,
 };
 
 // 已知类型返回其名称；未知类型返回 "UNKNOWN"。

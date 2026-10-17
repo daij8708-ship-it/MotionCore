@@ -87,11 +87,13 @@ jobs:
         run: ctest --test-dir build --output-on-failure
 
       - name: 断言核心产物零 Qt 依赖
-        # README 与报告都写着"两个核心二进制 ldd 的 Qt 命中为 0/0"，这里机器核对一次。
+        # 三个核心二进制（测试台、端到端演示、设备侧模拟器）的 ldd 里 Qt 命中必须是 0。
+        # 机器核对，不靠"反正核心库没链 Qt"这句话。
         run: |
           set -euo pipefail
-          hits=$(ldd build/common/tests/mc_core_tests build/tools/mc_loopback_demo | grep -ci 'qt6' || true)
-          echo "两个核心二进制的 Qt 命中行数：$hits"
+          hits=$(ldd build/common/tests/mc_core_tests build/tools/mc_loopback_demo build/tools/mc_sim \
+                 | grep -ci 'qt6' || true)
+          echo "三个核心二进制的 Qt 命中行数：$hits"
           if [ "$hits" -ne 0 ]; then
             echo "::error::核心二进制链接到了 Qt，违反 ADR-001"
             exit 1

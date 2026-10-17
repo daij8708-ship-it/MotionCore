@@ -19,7 +19,7 @@ using mc::TransitionResult;
 
 constexpr std::array<DeviceState, mc::kDeviceStateCount> kAllStates = {
     DeviceState::Disconnected, DeviceState::Initializing, DeviceState::Ready, DeviceState::Running,
-    DeviceState::Stopping,     DeviceState::Fault,        DeviceState::Recovery,
+    DeviceState::Stopping,     DeviceState::Fault,        DeviceState::Recovery, DeviceState::Home,
 };
 
 constexpr std::array<DeviceEvent, mc::kDeviceEventCount> kAllEvents = {
@@ -28,6 +28,7 @@ constexpr std::array<DeviceEvent, mc::kDeviceEventCount> kAllEvents = {
     DeviceEvent::StartAccepted,     DeviceEvent::StopReceived,
     DeviceEvent::StopCompleted,     DeviceEvent::FaultRaised,
     DeviceEvent::RecoveryConfirmed, DeviceEvent::RecoveryOk,
+    DeviceEvent::HomeAccepted,      DeviceEvent::HomeCompleted,
 };
 
 // ---------------------------------------------------------------------------
@@ -79,7 +80,10 @@ Expected specTable(DeviceState from, bool latch, DeviceEvent event) {
             return {false, from, latch};
 
         case DeviceEvent::StopReceived:
-            if (from == DeviceState::Running) {
+            // STOP 处处合法（幂等安全动作）。**回零中也要能停**：那是电机真的在转的时刻。
+            // 停下之后零点**没有建立** —— 所以它落到 Stopping 而不是 Ready，
+            // "这一趟回零作废"这件事在状态上就看得见。
+            if (from == DeviceState::Running || from == DeviceState::Home) {
                 return {true, DeviceState::Stopping, latch};
             }
             return {true, from, latch};
@@ -107,6 +111,23 @@ Expected specTable(DeviceState from, bool latch, DeviceEvent event) {
                 return {true, DeviceState::Ready, false};
             }
             return {false, from, latch};
+
+        case DeviceEvent::HomeAccepted:
+            // 回零与 START 同族：只在 Ready 开动。Running / Stopping 下必须先停，
+            // Fault / Recovery 下谈不上（零点都还没建立）。
+            if (from == DeviceState::Ready) {
+                return {true, DeviceState::Home, latch};
+            }
+            return {false, from, latch};
+
+        case DeviceEvent::HomeCompleted:
+            // 只有"正在回零"才能报到位。Ready 里收到它是**被拒**的：
+            // 那等于在没有回零的情况下宣称零点建立了，而这一条若是静默接受，
+            // 界面上的"零点已建立"就再也说不清是哪种来源。
+            if (from == DeviceState::Home) {
+                return {true, DeviceState::Ready, latch};
+            }
+            return {false, from, latch};
     }
     return {false, from, latch};
 }
@@ -129,10 +150,14 @@ TEST(DeviceState, WireValuesMatchSpec) {
     EXPECT_EQ(static_cast<std::uint8_t>(DeviceState::Stopping), 4U);
     EXPECT_EQ(static_cast<std::uint8_t>(DeviceState::Fault), 5U);
     EXPECT_EQ(static_cast<std::uint8_t>(DeviceState::Recovery), 6U);
-    EXPECT_EQ(mc::kDeviceStateCount, 7U);
+    EXPECT_EQ(static_cast<std::uint8_t>(DeviceState::Home), 7U);
+    EXPECT_EQ(mc::kDeviceStateCount, 8U);
 
     EXPECT_EQ(static_cast<std::uint8_t>(mc::FaultCode::None), 0U);
     EXPECT_EQ(static_cast<std::uint8_t>(mc::FaultCode::CommunicationLoss), 1U);
+    // 回零失败也是一个**设备侧故障码**，它与报警代码表的对应关系由 alarm.hpp 的
+    // static_assert 钉住 —— 这里只钉线上取值，免得两头都改了才有人发现对不上。
+    EXPECT_EQ(static_cast<std::uint8_t>(mc::FaultCode::HomeFailed), 6U);
 
     // 每个取值都要有名字 —— 否则日志里只会出现 "?"，排查时等于没有状态。
     for (const DeviceState state : kAllStates) {
@@ -144,9 +169,9 @@ TEST(DeviceState, WireValuesMatchSpec) {
 }
 
 // ---------------------------------------------------------------------------
-// 穷举：(7 状态 × 2 锁存位 × 10 事件) = 140 个组合逐格对照规格表
+// 穷举：(8 状态 × 2 锁存位 × 12 事件) = 192 个组合逐格对照规格表
 // ---------------------------------------------------------------------------
-TEST(DeviceState, AllOneHundredFortyCombinationsMatchTheSpecTable) {
+TEST(DeviceState, AllOneHundredNinetyTwoCombinationsMatchTheSpecTable) {
     const DeviceStateMachine probe;
     std::size_t legal = 0U;
     std::size_t illegal = 0U;
@@ -176,12 +201,13 @@ TEST(DeviceState, AllOneHundredFortyCombinationsMatchTheSpecTable) {
     }
 
     // 这两个数是设计表推出来的（不是"跑出来是多少就写多少"）：
-    //   合法 = LinkLost 7×2 + FaultRaised 6×2 + HandshakeOk 6×2 + StopReceived 7×2
-    //        + LinkOpened 1×2 + HandshakeTimeout 1×2 + StartAccepted 1×2
-    //        + StopCompleted 1×2 + RecoveryConfirmed 1×2 + RecoveryOk 1×2 = 64
-    EXPECT_EQ(legal + illegal, std::size_t{140});
-    EXPECT_EQ(legal, std::size_t{64});
-    EXPECT_EQ(illegal, std::size_t{76});
+    //   合法 = LinkLost 8×2 + StopReceived 8×2 + HandshakeOk 7×2 + FaultRaised 7×2
+    //        + LinkOpened / HandshakeTimeout / StartAccepted / StopCompleted /
+    //          RecoveryConfirmed / RecoveryOk / HomeAccepted / HomeCompleted 各 1×2
+    //        = 16 + 16 + 14 + 14 + 8×2 = 76
+    EXPECT_EQ(legal + illegal, std::size_t{192});
+    EXPECT_EQ(legal, std::size_t{76});
+    EXPECT_EQ(illegal, std::size_t{116});
 }
 
 // ---------------------------------------------------------------------------
@@ -228,15 +254,20 @@ TEST(DeviceState, RejectedEventChangesNothingAndIsCounted) {
     EXPECT_EQ(machine.rejectedTransitions(), 1ULL);
 }
 
-TEST(DeviceState, StopIsAcceptedFromEveryStateAndIdempotentOutsideRunning) {
+TEST(DeviceState, StopIsAcceptedFromEveryStateAndIdempotentOutsideTheMovingStates) {
     for (const DeviceState from : kAllStates) {
         DeviceStateMachine machine(from);
         const TransitionResult result = machine.apply(DeviceEvent::StopReceived);
         SCOPED_TRACE(mc::deviceStateName(from));
 
         EXPECT_TRUE(result.accepted);
-        if (from == DeviceState::Running) {
+        // 只有"电机动着"的状态会因此改变：Running 和 Home。
+        // 其余状态收到 STOP 是幂等的（不算错，也不算迁移）——
+        // 一个在任何状态下都接受的安全动作，才可能在下行链路单向、无应答的前提下
+        // 被反复发送。
+        if (from == DeviceState::Running || from == DeviceState::Home) {
             EXPECT_EQ(machine.state(), DeviceState::Stopping);
+            EXPECT_TRUE(result.stateChanged);
         } else {
             EXPECT_EQ(machine.state(), from);
             EXPECT_FALSE(result.stateChanged);
@@ -351,21 +382,24 @@ TEST(DeviceState, FaultIsNotRaisedWhileDisconnected) {
 // 命令门禁表：逐格断言，不是"抽查几条"
 // ---------------------------------------------------------------------------
 TEST(DeviceState, CommandGateTableMatchesSpec) {
-    const std::array<MessageType, 8> types = {
-        MessageType::Hello, MessageType::Heartbeat,   MessageType::Stop,     MessageType::SetMode,
-        MessageType::SetPid, MessageType::Start,      MessageType::SetTarget, MessageType::ClearFault,
+    const std::array<MessageType, 11> types = {
+        MessageType::Hello,    MessageType::Heartbeat,   MessageType::Stop,
+        MessageType::ReadParams, MessageType::SetMode,   MessageType::SetPid,
+        MessageType::SetLimits,  MessageType::Start,     MessageType::SetTarget,
+        MessageType::Home,       MessageType::ClearFault,
     };
 
     // 行 = kAllStates 的顺序，列 = 上面 types 的顺序。true = 放行。
-    const bool expected[7][8] = {
-        //  Hello  HB     STOP  SET_MODE SET_PID START  SET_TARGET CLEAR_FAULT
-        {true, true, true, false, false, false, false, false},  // Disconnected
-        {true, true, true, false, false, false, false, false},  // Initializing
-        {true, true, true, true, true, true, true, false},      // Ready
-        {true, true, true, false, true, false, true, false},    // Running
-        {true, true, true, false, true, false, false, false},   // Stopping
-        {true, true, true, false, false, false, false, true},   // Fault
-        {true, true, true, false, false, false, false, false},  // Recovery
+    const bool expected[8][11] = {
+        //  Hello  HB     STOP   READ   SET_MODE SET_PID SET_LIMITS START  SET_TARGET HOME   CLEAR_FAULT
+        {true, true, true, true, false, false, false, false, false, false, false},  // Disconnected
+        {true, true, true, true, false, false, false, false, false, false, false},  // Initializing
+        {true, true, true, true, true, true, true, true, true, true, false},        // Ready
+        {true, true, true, true, false, true, true, false, true, false, false},     // Running
+        {true, true, true, true, false, true, true, false, false, false, false},    // Stopping
+        {true, true, true, true, false, false, false, false, false, false, true},   // Fault
+        {true, true, true, true, false, false, false, false, false, false, false},  // Recovery
+        {true, true, true, true, false, false, false, false, false, false, false},  // Home
     };
 
     for (std::size_t row = 0U; row < kAllStates.size(); ++row) {
@@ -401,6 +435,20 @@ TEST(DeviceState, ControlCommandsAreGatedOnReadyOrRunningOnly) {
         // 其余状态要么没有故障可确认，要么链路根本发不出去。
         EXPECT_EQ(mc::commandVerdict(state, MessageType::ClearFault) == CommandVerdict::Allow,
                   state == DeviceState::Fault);
+
+        // 回零与 START 同一道闸（都是"让电机动起来"），但比 START 更不容许并行：
+        // 回零的前提是"此刻没有别的运动目标"。
+        EXPECT_EQ(mc::commandVerdict(state, MessageType::Home) == CommandVerdict::Allow,
+                  state == DeviceState::Ready);
+
+        // 软限位与 SET_PID 同族：改的是保护参数、不改变目标值。
+        const bool parameterWritable = (state == DeviceState::Ready ||
+                                        state == DeviceState::Running ||
+                                        state == DeviceState::Stopping);
+        EXPECT_EQ(mc::commandVerdict(state, MessageType::SetLimits) == CommandVerdict::Allow,
+                  parameterWritable);
+        EXPECT_EQ(mc::commandVerdict(state, MessageType::SetPid) == CommandVerdict::Allow,
+                  parameterWritable);
     }
 }
 
@@ -421,4 +469,64 @@ TEST(DeviceState, CommLossWindowMustOutlastTheHostHeartbeatPeriod) {
 
     EXPECT_LT(mc::kDeviceCommLossTimeoutMs, 5000U)
         << "窗口不宜再长：它直接等于电机带着陈旧目标还能跑多久";
+}
+
+// ---------------------------------------------------------------------------
+// 回零（P1-6）：入口只有 Ready 一条，出口只有'零点建立'一条
+// ---------------------------------------------------------------------------
+TEST(DeviceState, HomeStartsOnlyFromReadyAndOnlyLeavesThroughCompletion) {
+    // 入口：Running 下必须先 STOP —— 回零的前提是"此刻没有别的运动目标"。
+    DeviceStateMachine running(DeviceState::Running);
+    EXPECT_FALSE(running.apply(DeviceEvent::HomeAccepted).accepted);
+    EXPECT_EQ(running.state(), DeviceState::Running);
+
+    DeviceStateMachine ready(DeviceState::Ready);
+    const TransitionResult started = ready.apply(DeviceEvent::HomeAccepted);
+    ASSERT_TRUE(started.accepted);
+    EXPECT_TRUE(started.stateChanged);
+    EXPECT_EQ(ready.state(), DeviceState::Home);
+
+    ASSERT_TRUE(ready.apply(DeviceEvent::HomeCompleted).accepted);
+    EXPECT_EQ(ready.state(), DeviceState::Ready);
+
+    // 反向：没在回零却报"到位"必须被拒。放行它等于让"零点已建立"这句话
+    // 分不清是设备报的还是谁顺手写上去的 —— 而后面所有位置都相对它。
+    EXPECT_FALSE(ready.apply(DeviceEvent::HomeCompleted).accepted);
+    EXPECT_EQ(ready.state(), DeviceState::Ready);
+}
+
+TEST(DeviceState, StopDuringHomingGoesToStoppingNotReady) {
+    DeviceStateMachine machine(DeviceState::Home);
+
+    const TransitionResult stop = machine.apply(DeviceEvent::StopReceived);
+    ASSERT_TRUE(stop.accepted);
+    // 关键的一格：被 STOP 打断的回零**不经过 HomeCompleted**。
+    // 设备侧只在 HomeCompleted 时才把当前位置定义成 0（见 DeviceSimulator
+    // 的 defineOriginHere），所以"停下 ⇒ 零点没建立"这件事由这两处合起来证明，
+    // 状态机这边负责的是"别把它伪装成一次正常的结束"。
+    EXPECT_EQ(machine.state(), DeviceState::Stopping);
+
+    ASSERT_TRUE(machine.apply(DeviceEvent::StopCompleted).accepted);
+    EXPECT_EQ(machine.state(), DeviceState::Ready);
+}
+
+TEST(DeviceState, RepeatedHelloDoesNotDisturbHoming) {
+    DeviceStateMachine machine(DeviceState::Home);
+    EXPECT_TRUE(machine.apply(DeviceEvent::HandshakeOk).accepted);
+    EXPECT_EQ(machine.state(), DeviceState::Home) << "会话级消息不该打断回零";
+}
+
+// 回零中出故障：与其它状态一样锁存，而且**不能靠重连洗掉** ——
+// 这条路径在回零场景里格外常见（撞上机械限位 → 人拔线重来）。
+TEST(DeviceState, FaultDuringHomingLatchesAndSurvivesReconnect) {
+    DeviceStateMachine machine(DeviceState::Home);
+    ASSERT_TRUE(machine.apply(DeviceEvent::FaultRaised).accepted);
+    EXPECT_EQ(machine.state(), DeviceState::Fault);
+    EXPECT_TRUE(machine.faultLatched());
+
+    ASSERT_TRUE(machine.apply(DeviceEvent::LinkLost).accepted);
+    ASSERT_TRUE(machine.apply(DeviceEvent::LinkOpened).accepted);
+    ASSERT_TRUE(machine.apply(DeviceEvent::HandshakeOk).accepted);
+    EXPECT_EQ(machine.state(), DeviceState::Fault);
+    EXPECT_TRUE(machine.faultLatched());
 }

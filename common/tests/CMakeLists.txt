@@ -2,14 +2,23 @@ find_package(GTest REQUIRED)
 
 add_executable(mc_core_tests
     test_ack_tracker.cpp
+    test_alarm.cpp
+    test_audit.cpp
+    test_axis_group.cpp
     test_crc16.cpp
     test_device_state.cpp
     test_end_to_end.cpp
     test_frame_codec.cpp
+    test_interlock.cpp
     test_link_monitor.cpp
+    test_log.cpp
     test_loopback_transport.cpp
     test_payload.cpp
+    test_recipe.cpp
     test_ring_buffer.cpp
+    test_sequence.cpp
+    test_sim_loop.cpp
+    test_simulator_model.cpp
 )
 
 # 只链接 mc_core 与 GTest —— 不链接 Qt，也不链接任何其他库。

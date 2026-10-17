@@ -9,11 +9,13 @@
 #include <QHeaderView>
 #include <QLabel>
 #include <QPushButton>
+#include <QShowEvent>
 #include <QSpinBox>
 #include <QTableWidget>
 #include <QVBoxLayout>
 
 #include "mc/device_state.hpp"
+#include "mc_host/alarm_text.hpp"
 #include "mc_host/device.hpp"
 #include "mc_host/device_manager.hpp"
 
@@ -111,7 +113,7 @@ HistoryPage::HistoryPage(DeviceManager& manager, QWidget* parent)
     sampleLayout->addLayout(exportRow);
     tables->addWidget(sampleGroup, 0, 0);
 
-    auto* eventGroup = new QGroupBox(QStringLiteral("报警记录"), this);
+    auto* eventGroup = new QGroupBox(QStringLiteral("事件流水（按时间）"), this);
     auto* eventLayout = new QVBoxLayout(eventGroup);
     eventTable_ = new QTableWidget(0, 3, this);
     eventTable_->setObjectName(QStringLiteral("historyEventTable"));
@@ -121,6 +123,22 @@ HistoryPage::HistoryPage(DeviceManager& manager, QWidget* parent)
     eventTable_->setEditTriggers(QAbstractItemView::NoEditTriggers);
     eventTable_->horizontalHeader()->setStretchLastSection(true);
     eventLayout->addWidget(eventTable_);
+
+    // 分级报警单独一张表。它与上面那张"事件流水"不是一件事：
+    // 流水回答"按时间先后发生了什么"（报警、配方下装混在同一条线上），
+    // 这张回答"哪些是 Error 以上、确认了没有" —— 后者只有在保存了代码和等级
+    // 的前提下才答得出来，而光存一句文本是答不了的。
+    auto* alarmGroup = new QGroupBox(QStringLiteral("分级报警（代码 / 等级 / 确认）"), this);
+    auto* alarmLayout = new QVBoxLayout(alarmGroup);
+    alarmTable_ = new QTableWidget(0, 6, this);
+    alarmTable_->setObjectName(QStringLiteral("historyAlarmTable"));
+    alarmTable_->setHorizontalHeaderLabels(
+        {QStringLiteral("首次(墙上)"), QStringLiteral("等级"), QStringLiteral("代码"),
+         QStringLiteral("次数"), QStringLiteral("状态"), QStringLiteral("说明")});
+    alarmTable_->verticalHeader()->setVisible(false);
+    alarmTable_->setEditTriggers(QAbstractItemView::NoEditTriggers);
+    alarmTable_->horizontalHeader()->setStretchLastSection(true);
+    alarmLayout->addWidget(alarmTable_);
 
     auto* commandGroup = new QGroupBox(QStringLiteral("命令记录"), this);
     auto* commandLayout = new QVBoxLayout(commandGroup);
@@ -134,10 +152,16 @@ HistoryPage::HistoryPage(DeviceManager& manager, QWidget* parent)
     commandTable_->horizontalHeader()->setStretchLastSection(true);
     commandLayout->addWidget(commandTable_);
 
-    tables->addWidget(eventGroup, 0, 1);
-    tables->addWidget(commandGroup, 1, 0, 1, 2);
+    // 上排看"这一段里数据与报警长什么样"，下排看"逐条发生了什么"。
+    // 四张表都摆得下是因为每一张都有自己的滚动条 —— 页面本身不跟着变长。
+    tables->addWidget(sampleGroup, 0, 0);
+    tables->addWidget(alarmGroup, 0, 1);
+    tables->addWidget(eventGroup, 1, 0);
+    tables->addWidget(commandGroup, 1, 1);
     tables->setColumnStretch(0, 3);
     tables->setColumnStretch(1, 2);
+    tables->setRowStretch(0, 3);
+    tables->setRowStretch(1, 2);
     root->addLayout(tables, 1);
 
     connect(refreshButton_, &QPushButton::clicked, this, &HistoryPage::refreshSessions);
@@ -196,6 +220,7 @@ void HistoryPage::runQuery() {
                              : QStringLiteral("没有历史库"));
         rangeLabel_->setText(QStringLiteral("没有可查询的数据。"));
         sampleTable_->setRowCount(0);
+        alarmTable_->setRowCount(0);
         eventTable_->setRowCount(0);
         commandTable_->setRowCount(0);
         return;
@@ -236,6 +261,31 @@ void HistoryPage::runQuery() {
     }
     sampleTable_->resizeColumnsToContents();
 
+    const std::vector<HistoryStore::AlarmRow> alarms = store->alarms(sessionId, error);
+    alarmTable_->setRowCount(static_cast<int>(alarms.size()));
+    row = 0;
+    for (const HistoryStore::AlarmRow& alarm : alarms) {
+        alarmTable_->setItem(row, 0,
+                             new QTableWidgetItem(wallText(alarm.firstWallMs)));
+        alarmTable_->setItem(
+            row, 1,
+            new QTableWidgetItem(alarmLevelText(static_cast<mc::AlarmLevel>(alarm.level))));
+        alarmTable_->setItem(row, 2,
+                             new QTableWidgetItem(alarmCodeText(
+                                 static_cast<std::uint16_t>(alarm.code))));
+        alarmTable_->setItem(row, 3, new QTableWidgetItem(QString::number(alarm.occurrences)));
+        // 状态必须是"确认了没有"**和**"现在还挂着没有"两件事，缺一件都不够判断：
+        // 已恢复但没确认的报警仍然拦着启动，只写"已恢复"会让人以为可以不管了。
+        QString state = alarm.active ? QStringLiteral("挂着") : QStringLiteral("已恢复");
+        state += alarm.acknowledged ? QStringLiteral("·已确认")
+                                    : QStringLiteral("·未确认（当时拦启动）");
+        alarmTable_->setItem(row, 4, new QTableWidgetItem(state));
+        alarmTable_->setItem(row, 5, new QTableWidgetItem(alarmText(
+                                                 static_cast<std::uint16_t>(alarm.code))));
+        ++row;
+    }
+    alarmTable_->resizeColumnsToContents();
+
     const std::vector<HistoryStore::EventRow> events = store->events(sessionId, error);
     eventTable_->setRowCount(static_cast<int>(events.size()));
     row = 0;
@@ -272,12 +322,13 @@ void HistoryPage::runQuery() {
     // 把它们混起来正好会让人以为"数据只有这么点"。
     rangeLabel_->setText(
         QStringLiteral("会话 #%1：时间窗 %2–%3 ms 内共 %4 条样本（表里显示前 %5 条）、"
-                       "%6 条报警、%7 条命令。")
+                       "%6 条分级报警、%7 条事件流水、%8 条命令。")
             .arg(sessionId)
             .arg(from)
             .arg(to)
             .arg(matched)
             .arg(samples.size())
+            .arg(alarms.size())
             .arg(events.size())
             .arg(commands.size()));
 }
@@ -287,6 +338,12 @@ void HistoryPage::refresh() {
     // 每 50 ms 全表重查一次既浪费又会让正在看的那一页不停跳动。
     // 只在"连接状态变了"时刷新会话列表；要看最新数据，点查询按钮。
     refreshSessions();
+}
+
+void HistoryPage::showEvent(QShowEvent* event) {
+    QWidget::showEvent(event);
+    // 只在"真的切到这一页"时刷新，不在每拍刷新（理由见 refresh()）。
+    refresh();
 }
 
 void HistoryPage::exportCsv() {
