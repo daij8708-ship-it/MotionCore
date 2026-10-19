@@ -13,4 +13,8 @@ void setLed(bool on);
 void setMotor(std::uint16_t pwm, bool forward, bool enable);
 std::uint32_t uartErrorCount();
 
+// TIM4 正交解码：PB6 = CH1，PB7 = CH2，四倍频计数。
+void initEncoder();
+std::uint16_t encoderCount();
+
 }  // namespace mcfw::board

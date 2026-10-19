@@ -51,6 +51,8 @@ void Device::reset(std::uint32_t nowMs) {
     position_ = 0.0F;
     measuredVelocity_ = 0.0F;
     measuredPosition_ = 0.0F;
+    externalPositionDeg_ = 0.0F;
+    hasExternalPosition_ = false;
     lastCommand_ = 0.0F;
     pwmOutput_ = 0U;
 
@@ -397,6 +399,14 @@ void Device::tick(std::uint32_t nowMs) {
 }
 
 void Device::integrate(float dtSeconds) {
+    // 真机反馈模式下，位置/速度来自编码器；虚拟被控对象整体旁路。
+    // 控制律与限幅仍照常跑，但它们只产出 PWM 指令，不再积分出假速度。
+    const bool external = config_.externalFeedback && hasExternalPosition_;
+    if (external) {
+        position_ = externalPositionDeg_;
+        velocity_ = measuredVelocity_;
+    }
+
     const bool homing = state_.is(mc::DeviceState::Home);
     const bool driving = (state_.is(mc::DeviceState::Running) && runMode_ != 0U) || homing;
 
@@ -427,6 +437,11 @@ void Device::integrate(float dtSeconds) {
     }
 
     lastCommand_ = command;
+
+    if (external) {
+        updateMeasurement();
+        return;
+    }
 
     const float maxDelta = config_.accelDegPerSec2 * dtSeconds;
     const float delta = clampf(command - velocity_, -maxDelta, maxDelta);

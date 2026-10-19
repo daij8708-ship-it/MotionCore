@@ -383,3 +383,26 @@ TEST(FirmwareDevice, FaultEventIsPeriodicWhileFaulted) {
     const std::size_t laterCount = rig.framesOfType(mc::MessageType::FaultEvent).size();
     EXPECT_GT(laterCount, firstCount);
 }
+
+TEST(FirmwareDevice, ExternalFeedbackReplacesTheVirtualPlant) {
+    mcfw::Config config;
+    config.externalFeedback = true;
+    config.encoderCountsPerRev = 2800.0F;
+    mcfw::Device device(config);
+
+    // 每 10 ms 喂 10°，50 ms 窗口内的位移是 50°，速度应约为 1000 deg/s。
+    // 如果外部反馈没有生效，虚拟模型在无指令时位置会一直停在 0。
+    for (std::uint32_t t = 10U; t <= 50U; t += 10U) {
+        device.setExternalPositionDeg(static_cast<float>(t));
+        device.tick(t);
+    }
+    EXPECT_NEAR(device.positionDeg(), 50.0F, 0.2F);
+    EXPECT_NEAR(device.velocityDegPerSec(), 1000.0F, 30.0F);
+
+    // 默认（仿真）模式下，喂进来的外部位置必须完全无效。
+    mcfw::Device virtualDevice;
+    virtualDevice.setExternalPositionDeg(123.0F);
+    virtualDevice.tick(10U);
+    EXPECT_NEAR(virtualDevice.positionDeg(), 0.0F, 0.001F);
+    EXPECT_NEAR(virtualDevice.velocityDegPerSec(), 0.0F, 0.001F);
+}

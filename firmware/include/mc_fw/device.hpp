@@ -24,6 +24,9 @@ struct Config {
     std::uint32_t commLossTimeoutMs = 3000U;
     std::uint32_t telemetryPeriodMs = 10U;
     std::uint32_t faultEventPeriodMs = 500U;
+    // 真机端口置 true：位置/速度由编码器喂进来，不再跑虚拟被控对象。
+    // 宿主模拟器保持 false，行为与以前完全一致。
+    bool externalFeedback = false;
 };
 
 struct Stats {
@@ -51,6 +54,12 @@ public:
     // 推进时间：积分运动、跑安全检查、按周期产生遥测与故障事件。
     void tick(std::uint32_t nowMs);
 
+    // 真机端口每拍喂入编码器换算出的大轴角度。只在 externalFeedback=true 时生效。
+    void setExternalPositionDeg(float deg) noexcept {
+        externalPositionDeg_ = deg;
+        hasExternalPosition_ = true;
+    }
+
     // 取出一帧待发送数据；队列为空返回 0。
     std::size_t popFrame(std::uint8_t* out, std::size_t capacity) noexcept;
 
@@ -63,6 +72,9 @@ public:
     float velocityDegPerSec() const noexcept { return measuredVelocity_; }
     float target() const noexcept { return target_; }
     std::uint8_t runMode() const noexcept { return runMode_; }
+    // 控制律本拍输出的带符号指令。端口用它决定方向，不能用测速符号：
+    // 起转前测速为 0，负目标会被误判成正向。
+    float command() const noexcept { return lastCommand_; }
     std::uint16_t pwmOutput() const noexcept { return pwmOutput_; }
 
 private:
@@ -140,6 +152,8 @@ private:
     float position_ = 0.0F;
     float measuredVelocity_ = 0.0F;
     float measuredPosition_ = 0.0F;
+    float externalPositionDeg_ = 0.0F;
+    bool hasExternalPosition_ = false;
     float lastCommand_ = 0.0F;
     std::uint16_t pwmOutput_ = 0U;
 

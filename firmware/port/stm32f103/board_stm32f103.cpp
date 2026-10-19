@@ -71,8 +71,10 @@ void init() {
     configPin(stm32f103::kGpioA->CRH, 10U, 0x4U);
 
     // PA5 = 驱动器使能，PA6 = TIM3_CH1 PWM，PA7 = 方向。
+    // PA6 必须是复用推挽（0xB）：配成普通推挽（0x3）时 GPIO 输出寄存器
+    // 会把引脚拉低，定时器的 PWM 根本到不了引脚，外观上就是"有占空比但不动"。
     configPin(stm32f103::kGpioA->CRL, 5U, 0x3U);
-    configPin(stm32f103::kGpioA->CRL, 6U, 0x3U);
+    configPin(stm32f103::kGpioA->CRL, 6U, 0xBU);
     configPin(stm32f103::kGpioA->CRL, 7U, 0x3U);
 
     // PC13 = 板载 LED（低电平点亮）。
@@ -105,6 +107,36 @@ void init() {
     stm32f103::kSystick->CTRL = stm32f103::kSystickCtrlClksource |
                                stm32f103::kSystickCtrlTickint |
                                stm32f103::kSystickCtrlEnable;
+
+    initEncoder();
+
+    // PB0 = TB6612 的 AIN2（AIN1 是 PA7）。两脚都低 = 滑行；
+    // 一高一低才是有方向的驱动，单 DIR 接法做不到反向。
+    configPin(stm32f103::kGpioB->CRL, 0U, 0x3U);
+    writePinLow(stm32f103::kGpioB, 0U);
+}
+
+void initEncoder() {
+    // PB6/PB7 是 TIM4_CH1/CH2 的默认引脚，配成浮空输入即可交给定时器。
+    stm32f103::kRcc->APB2ENR |= stm32f103::kRccApb2Iopb;
+    stm32f103::kRcc->APB1ENR |= stm32f103::kRccApb1Tim4;
+    configPin(stm32f103::kGpioB->CRL, 6U, 0x4U);
+    configPin(stm32f103::kGpioB->CRL, 7U, 0x4U);
+
+    // 编码器模式 3：TI1/TI2 的每个边沿都计数，即四倍频。
+    // 输入滤波器取 0x3，抑制电机电刷噪声；ARR 用满 16 位，由软件处理回绕。
+    stm32f103::kTim4->PSC = 0U;
+    stm32f103::kTim4->ARR = 0xFFFFU;
+    stm32f103::kTim4->CCMR1 = 0x3131U;   // CC1S=01, CC2S=01, IC1F=IC2F=0011
+    stm32f103::kTim4->CCER = 0x11U;      // CC1E | CC2E
+    stm32f103::kTim4->SMCR = 0x3U;       // SMS=011：编码器模式 3
+    stm32f103::kTim4->EGR = stm32f103::kTimEgrUg;
+    stm32f103::kTim4->CNT = 0U;
+    stm32f103::kTim4->CR1 = stm32f103::kTimCr1Cen;
+}
+
+std::uint16_t encoderCount() {
+    return static_cast<std::uint16_t>(stm32f103::kTim4->CNT & 0xFFFFU);
 }
 
 std::uint32_t millis() {
@@ -157,10 +189,18 @@ void setMotor(std::uint16_t pwm, bool forward, bool enable) {
         writePinLow(stm32f103::kGpioA, 5U);
     }
 
-    if (forward) {
+    // TB6612 A 通道真值表：AIN1=PA7、AIN2=PB0。
+    // 正转 1/0、反转 0/1、两脚同低 = 滑行。禁用时必须两脚都低，
+    // 否则 STBY 拉低只是待机，方向脚仍可能被下一段代码重新拉高。
+    if (!enable) {
+        writePinLow(stm32f103::kGpioA, 7U);
+        writePinLow(stm32f103::kGpioB, 0U);
+    } else if (forward) {
         writePinHigh(stm32f103::kGpioA, 7U);
+        writePinLow(stm32f103::kGpioB, 0U);
     } else {
         writePinLow(stm32f103::kGpioA, 7U);
+        writePinHigh(stm32f103::kGpioB, 0U);
     }
 }
 

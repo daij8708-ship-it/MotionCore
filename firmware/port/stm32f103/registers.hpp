@@ -66,18 +66,22 @@ struct Systick {
 
 inline Rcc* const kRcc = reinterpret_cast<Rcc*>(0x40021000UL);
 inline Gpio* const kGpioA = reinterpret_cast<Gpio*>(0x40010800UL);
+inline Gpio* const kGpioB = reinterpret_cast<Gpio*>(0x40010C00UL);
 inline Gpio* const kGpioC = reinterpret_cast<Gpio*>(0x40011000UL);
 inline Usart* const kUsart1 = reinterpret_cast<Usart*>(0x40013800UL);
 inline Tim* const kTim3 = reinterpret_cast<Tim*>(0x40000400UL);
+inline Tim* const kTim4 = reinterpret_cast<Tim*>(0x40000800UL);
 inline Systick* const kSystick = reinterpret_cast<Systick*>(0xE000E010UL);
 inline volatile std::uint32_t* const kNvicIser1 =
     reinterpret_cast<volatile std::uint32_t*>(0xE000E104UL);
 
 inline constexpr std::uint32_t kRccApb2Afio = 1UL << 0U;
 inline constexpr std::uint32_t kRccApb2Iopa = 1UL << 2U;
+inline constexpr std::uint32_t kRccApb2Iopb = 1UL << 3U;
 inline constexpr std::uint32_t kRccApb2Iopc = 1UL << 4U;
 inline constexpr std::uint32_t kRccApb2Usart1 = 1UL << 14U;
 inline constexpr std::uint32_t kRccApb1Tim3 = 1UL << 1U;
+inline constexpr std::uint32_t kRccApb1Tim4 = 1UL << 2U;
 
 inline constexpr std::uint32_t kUsartSrPe = 1UL << 0U;
 inline constexpr std::uint32_t kUsartSrFe = 1UL << 1U;

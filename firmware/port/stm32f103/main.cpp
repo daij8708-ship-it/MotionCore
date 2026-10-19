@@ -8,9 +8,20 @@
 int main(void) {
     mcfw::board::init();
 
-    mcfw::Device device;
+    // 真机反馈：N20 编码器 7 PPR × 4 倍频 × 1:100 = 2800 计数/输出轴转。
+    // 方向系数先取 +1；若正转时位置递减，把它改成 -1（等价于交换 C1/C2）。
+    constexpr float kEncoderCountsPerRev = 2800.0F;
+    constexpr float kEncoderDirection = 1.0F;
+
+    mcfw::Config config;
+    config.encoderCountsPerRev = kEncoderCountsPerRev;
+    config.externalFeedback = true;
+    mcfw::Device device(config);
     mcfw::FrameParser parser;
     std::uint32_t lastTick = mcfw::board::millis();
+
+    std::uint16_t lastCount = mcfw::board::encoderCount();
+    std::int32_t totalCounts = 0;
 
     for (;;) {
         std::uint8_t incoming = 0U;
@@ -23,6 +34,14 @@ int main(void) {
 
         const std::uint32_t now = mcfw::board::millis();
         if (now != lastTick) {
+            const std::uint16_t count = mcfw::board::encoderCount();
+            const std::uint16_t wrapped = static_cast<std::uint16_t>(count - lastCount);
+            totalCounts += static_cast<std::int16_t>(wrapped);
+            lastCount = count;
+
+            const float deg = kEncoderDirection * static_cast<float>(totalCounts) * 360.0F /
+                              kEncoderCountsPerRev;
+            device.setExternalPositionDeg(deg);
             device.tick(now);
             lastTick = now;
         }
@@ -45,6 +64,7 @@ int main(void) {
         mcfw::board::setLed(led);
 
         const bool enabled = state == mc::DeviceState::Running || state == mc::DeviceState::Home;
-        mcfw::board::setMotor(device.pwmOutput(), device.velocityDegPerSec() >= 0.0F, enabled);
+        // 方向取指令符号：测速符号在起转前恒为 0，负目标会被误判成正向。
+        mcfw::board::setMotor(device.pwmOutput(), device.command() >= 0.0F, enabled);
     }
 }
