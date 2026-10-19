@@ -46,14 +46,18 @@
   find CMakeLists.txt common tools host firmware -type f | LC_ALL=C sort | xargs sha256sum --text | sha256sum --text
   ```
 
-  结果：`ee21b408e1e24501e3bce9f54780c3e28ebaeb36d536268e2de7ed62c77802f9`
+  结果：`d0d8be9f506301bd84f16a73de52e353814ce42c8c6d047af8c412709ffd3a51`
 
   > 口径从增量 7 起**纳入 `host/`**，从增量 20 起**纳入 `firmware/`**。
   > 固件构建目录刻意放在仓库根的 `build-fw*`，不放进 `firmware/`，否则构建产物会混进指纹。
   > 同时仍在刻意**排除 `docs/`**：口径包含 `docs/TEST_REPORT.md` 会形成自指
   > （这个文件里就写着指纹本身）。`docs/PERF.md` 同理不参与 —— 它是文档，不是产物。
 
-  已在 **WSL** 与 **Windows Git Bash** 两侧各算一遍，得到**同一个值**（理由与踩过的坑见 §6 的 C23）。
+  ⚠️ 这个值取的是 **CI 在 Linux 检出后、按提交里 LF 内容算出的结果**。
+  Windows 工作树若 `core.autocrlf=true`，同一份提交在本地按 CRLF 会算出另一个值
+  （本轮实测 `ee21b408…`），两条命令都不报错、但值不同。要让本地复现 CI 的值，
+  先把提交导出成 LF 再算：`git -c core.autocrlf=false archive HEAD | tar -x -C <临时目录>`。
+  判指纹不一致时**先比文件内容/行尾，再怀疑源码**（与 §6 的 C23 同一类坑）。
 
 > **口径里那两个 `--text` 是必要的，不是装饰。** `sha256sum` 默认按平台决定标记：
 > Linux 输出两个空格，Git Bash（MSYS）输出 `*`（二进制模式）。于是**同样的文件、同一句命令**，
@@ -86,7 +90,7 @@
 | 18 | 124 / 29913 | `8d2ea4657d2b6747c8b65fdfadae62e1d5bece07170c45115c37472ca28fab7e`（口径：`CMakeLists.txt common tools host`，**不含 `firmware/`**） |
 | 19 | 139 / 32825 | `cb1a7b1ac42bc53fc11aac80b4a1dea560ff9905e1568e0b3a2162f40c415834`（同上，不含 `firmware/`） |
 | 20 | 156 / 35553 | `d421357fe4813b2a8e38a1fa2c4155c99e21df9e638e32585005f71e5b5d62fe`（口径：`CMakeLists.txt common tools host firmware`） |
-| 21 | 156 / 35688 | `ee21b408e1e24501e3bce9f54780c3e28ebaeb36d536268e2de7ed62c77802f9`（当前口径：同上） |
+| 21 | 156 / 35688 | `d0d8be9f506301bd84f16a73de52e353814ce42c8c6d047af8c412709ffd3a51`（当前口径：同上；CI 值） |
 
 ## 2. 测试环境
 
